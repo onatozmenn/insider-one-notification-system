@@ -4,7 +4,7 @@ A scalable notification service that accepts SMS, email, and push requests, proc
 
 Built for the **Insider One Software Engineer Assessment 2026** in Go, PostgreSQL, and Redis.
 
-> **Status:** design complete; implementation is in progress. The architecture, API contract, and reliability rules are in [`docs/`](docs/). Work is tracked in issues and [`docs/roadmap.md`](docs/roadmap.md).
+> **Status:** the core MVP is running. The API, PostgreSQL schema, Redis queue, worker, provider calls, retries, and dead-letter handling are implemented. Observability, OpenAPI, and the bonus features are in progress. The architecture and contracts are in [`docs/`](docs/).
 
 ## What it does
 
@@ -49,8 +49,6 @@ The API and worker are two processes from the same codebase. PostgreSQL is the s
 | Delivery simulation | webhook.site; tests use a local `httptest` provider. |
 
 ## Quickstart
-
-The stack lands in M0-4 and is completed in M5-1. The commands below are the target interface.
 
 ```bash
 git clone https://github.com/onatozmenn/insider-one-notification-system.git
@@ -121,14 +119,12 @@ curl -s -X POST "http://localhost:8080/api/v1/notifications/${NOTIFICATION_ID}/c
 
 ## Testing
 
-The test targets and integration infrastructure arrive in M5-3. The target commands are:
-
 ```bash
-make test          # unit + integration
+make test          # unit tests with the race detector
 make test-unit
-make test-integration
-make smoke         # against a running stack
 ```
+
+The integration and smoke profiles are still in progress. Provider tests use a local `httptest` server and do not depend on webhook.site.
 
 The integration tests use real PostgreSQL and Redis via testcontainers locally and service containers in CI. The provider tests use `httptest`; they do not depend on webhook.site.
 

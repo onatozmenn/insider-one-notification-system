@@ -94,8 +94,6 @@ Content-Type: application/json
 
 If Redis is unavailable, the notification is persisted as `pending` and the response is still `202`. The reconciler enqueues it when Redis returns. Use an `Idempotency-Key` if the client may retry.
 
-> In the M1 slice, the row is returned as `pending`. M2 adds the enqueue step and returns `queued`.
-
 ```json
 {
   "id": "0193b2f4-7c1a-7d3e-9a10-5f8c2d6e4b71",
@@ -150,8 +148,6 @@ Rules:
 - `notifications` contains 1 to 1000 items.
 - Validation is all-or-nothing. If one item is invalid, nothing is inserted.
 - Item errors use the array index in the `field` value.
-
-> In the M1 slice, the batch is returned as `pending`. M2 enqueues the items and the status becomes `processing`.
 
 Response:
 
