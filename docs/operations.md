@@ -8,6 +8,8 @@
 
 ## 2. Quickstart
 
+The Compose stack lands in M0-4 and is completed in M5-1. The commands below are the target interface.
+
 ```bash
 git clone https://github.com/onatozmenn/insider-one-notification-system.git
 cd insider-one-notification-system
@@ -66,7 +68,7 @@ Copy `.env.example` to `.env` for local overrides. Docker Compose reads `.env` a
 | `PROVIDER_TIMEOUT` | `10s` | Per-attempt provider timeout. |
 | `WORKER_CONCURRENCY` | `50` | asynq worker concurrency. |
 | `RATE_LIMIT_PER_SECOND` | `100` | Per-channel provider limit. |
-| `RATE_LIMIT_BURST` | `100` | Per-channel burst. |
+| `RATE_LIMIT_BURST` | `1` | Per-channel burst. Keep at 1 to enforce 100/s. |
 | `MAX_ATTEMPTS` | `5` | Total attempts per notification. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | Enables tracing when set. |
@@ -136,14 +138,30 @@ make openapi-lint
 
 Run PostgreSQL and Redis with compose, then run the binaries:
 
+The Compose dev override publishes PostgreSQL on `5433` and Redis on `6379` for host-run binaries:
+
 ```bash
-docker compose up -d postgres redis
+docker compose -f docker-compose.yml -f compose.dev.yml up -d postgres redis
+```
+
+Run the API and worker in separate terminals:
+
+```bash
+# Terminal 1
 go run ./cmd/migrate up
 go run ./cmd/api
+
+# Terminal 2
 go run ./cmd/worker
 ```
 
-Set `DATABASE_URL`, `REDIS_ADDR`, and `PROVIDER_BASE_URL` in your shell or `.env`.
+For host runs, set:
+
+```bash
+DATABASE_URL=postgres://postgres:postgres@localhost:5433/notifications?sslmode=disable
+REDIS_ADDR=localhost:6379
+PROVIDER_BASE_URL=https://webhook.site/<your-uuid>
+```
 
 ## 9. Runbook
 
@@ -181,9 +199,9 @@ LIMIT 50;
 ### Redis is down
 
 - `/readyz` returns `503`.
-- The API can still insert notifications as `pending`.
+- The API accepts creates as `pending` and returns `202`. The reconciler enqueues them when Redis returns.
 - The worker cannot consume.
-- When Redis returns, the reconciler enqueues pending rows.
+- Use an `Idempotency-Key` if the client may retry a create during the outage.
 - Restart Redis and watch the queue drain.
 
 ### PostgreSQL is down
@@ -220,7 +238,7 @@ docker compose logs -f api | jq .
 
 - `GET /healthz`: process is alive.
 - `GET /readyz`: PostgreSQL and Redis respond.
-- Docker healthchecks use these endpoints. A failing readiness check keeps the container out of the gateway pool.
+- Docker healthchecks mark a container unhealthy, but Docker alone does not remove it from an nginx upstream. The gateway uses `max_fails` and `fail_timeout` on the API upstream; in this single-instance assessment, the gateway returns `502` or `503` while the API is down. A production deployment would use a load balancer that watches readiness.
 
 ## 12. Security notes
 

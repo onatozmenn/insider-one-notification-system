@@ -12,7 +12,7 @@ Built for the **Insider One Software Engineer Assessment 2026** in Go, PostgreSQ
 - Query by notification ID or batch ID. List with status, channel, and date filters plus pagination.
 - Cancel pending or scheduled notifications.
 - Process asynchronously with priority queues, 100 messages/second per channel, retries, backoff, and dead letters.
-- Deduplicate client retries and worker retries with idempotency keys and guarded state transitions.
+- Reduce duplicate sends with idempotency keys and guarded state transitions. The delivery contract remains at-least-once.
 - Expose Prometheus metrics, structured logs with correlation IDs, health checks, and a human-readable stats endpoint.
 
 ## Architecture
@@ -50,6 +50,8 @@ The API and worker are two processes from the same codebase. PostgreSQL is the s
 
 ## Quickstart
 
+The stack lands in M0-4 and is completed in M5-1. The commands below are the target interface.
+
 ```bash
 git clone https://github.com/onatozmenn/insider-one-notification-system.git
 cd insider-one-notification-system
@@ -78,7 +80,7 @@ curl -s -X POST http://localhost:8080/api/v1/notifications \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: demo-001' \
   -d '{
-    "recipient": "+905551234567",
+    "recipient": "+15555550100",
     "channel": "sms",
     "content": "Your order has shipped.",
     "priority": "high"
@@ -92,7 +94,7 @@ curl -s -X POST http://localhost:8080/api/v1/notifications/batch \
   -H 'Content-Type: application/json' \
   -d '{
     "notifications": [
-      {"recipient": "+905551234567", "channel": "sms", "content": "Flash sale starts now.", "priority": "high"},
+      {"recipient": "+15555550100", "channel": "sms", "content": "Flash sale starts now.", "priority": "high"},
       {"recipient": "onat@example.com", "channel": "email", "subject": "Weekly summary", "content": "Here is what happened.", "priority": "normal"}
     ]
   }'
@@ -113,6 +115,8 @@ curl -s -X POST http://localhost:8080/api/v1/notifications/<notification-id>/can
 ```
 
 ## Testing
+
+The test targets and integration infrastructure arrive in M5-3. The target commands are:
 
 ```bash
 make test          # unit + integration

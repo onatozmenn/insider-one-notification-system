@@ -99,7 +99,7 @@ The real webhook.site endpoint is never used in tests. It is a demo dependency, 
 
 ## 5. Smoke test
 
-`make smoke` runs against the composed stack:
+`make smoke` runs against the composed stack. The smoke profile overrides `PROVIDER_BASE_URL` with a local `provider-mock` service, so the test never depends on the expiring webhook.site URL.
 
 1. Wait for `/readyz`.
 2. Create one SMS notification.
@@ -111,6 +111,8 @@ The real webhook.site endpoint is never used in tests. It is a demo dependency, 
 The script fails with a non-zero exit code and prints the last status and logs on failure.
 
 ## 6. Commands
+
+These targets land with the Go module and Makefile (M0-2) and the full suite (M5-3).
 
 ```bash
 # Everything
@@ -142,7 +144,7 @@ docker compose --profile test run --rm test
 
 ## 7. CI
 
-`.github/workflows/ci.yml` runs on every push and pull request:
+The planned `.github/workflows/ci.yml` (M0-5) will run on every push and pull request:
 
 1. `gofmt` and `goimports` check.
 2. `golangci-lint`.
@@ -164,7 +166,7 @@ Cache Go modules and build cache. Fail fast on formatting and lint.
 
 ## 9. Test data
 
-- Phone numbers use the reserved `+90555` prefix.
+- Phone numbers use the non-routable fiction range `+15555550100`.
 - Emails use `example.com`.
 - Device tokens are random strings.
 - Never use real personal data.

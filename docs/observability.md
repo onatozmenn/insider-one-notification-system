@@ -41,7 +41,7 @@ Rules:
     "failed": 3,
     "dead_letter": 1
   },
-  "success_rate": 0.9975,
+  "success_rate": 0.9967,
   "p95_latency_ms": 180
 }
 ```
@@ -49,7 +49,7 @@ Rules:
 - Counts come from `notifications` for the last five minutes.
 - Queue depth comes from asynq Inspector.
 - Success rate is `accepted / (accepted + failed + dead_letter)`.
-- p95 latency is computed from `notification_processing_duration_seconds` or from `accepted_at - created_at` for the window.
+- p95 latency is computed from `accepted_at - created_at` for the window (end-to-end acceptance latency). The histogram `notification_processing_duration_seconds` measures claim-to-terminal time for worker diagnostics; it is not the `/stats` value.
 
 The endpoint is read-only and does not touch the queue.
 
@@ -88,7 +88,7 @@ Example worker log:
   "attempt": 1,
   "duration_ms": 123,
   "provider_message_id": "3f2b9c1e-8a4d-4f6e-9b2a-1c7d5e8f0a3b",
-  "recipient": "+90555****567"
+  "recipient": "+1555***100"
 }
 ```
 
@@ -97,7 +97,10 @@ Rules:
 - Required fields: `time`, `level`, `service`, `msg`.
 - Correlation fields when available: `request_id`, `notification_id`, `batch_id`.
 - Worker fields: `channel`, `attempt`, `duration_ms`, `error`.
-- Mask recipients. Phone: keep the first 6 and last 3 characters. Email: keep the first character and the domain. Device token: first 6 characters.
+- Mask recipients. If the rule would reveal the full value, print `***` instead.
+  - Phone: keep the country code and the last 3 digits (`+1555***100`).
+  - Email: keep the first character and the domain only when the local part has at least 3 characters; otherwise use `***@domain`.
+  - Device token: keep the first 6 characters only when the token is longer than 12 characters; otherwise use `***`.
 - Never log full payloads. Content may contain personal data.
 - Errors include a stable `error_code` and a short message. Stack traces are for local development only.
 
@@ -175,7 +178,7 @@ These are not implemented in the assessment, but the metrics support them:
 | --- | --- |
 | Queue backlog | `queue_depth{queue="high"} > 1000` for 5 minutes. |
 | Dead letters | `increase(notification_status_total{status="dead_letter"}[5m]) > 10`. |
-| Provider errors | `provider_request_total{result="transient_error"}` above 5% for 5 minutes. |
+| Provider errors | `sum(rate(provider_request_total{result="transient_error"}[5m])) / sum(rate(provider_request_total[5m])) > 0.05` for 5 minutes. |
 | Latency | p95 `provider_request_duration_seconds` above 2 seconds. |
 | Readiness | `/readyz` fails for 1 minute. |
 

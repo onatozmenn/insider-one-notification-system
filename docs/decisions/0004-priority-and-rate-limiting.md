@@ -17,10 +17,12 @@ Strict priority is easy but starves `low` during a sustained burst. A single FIF
 ## Decision
 
 - Use three asynq queues with weights: `high` 6, `normal` 3, `low` 1.
-- Use `redis_rate` (GCRA) with one key per channel: 100 requests/second, burst 100.
+- Use `redis_rate` (GCRA) with one key per channel: 100 requests/second, burst 1.
 - Workers wait for a token instead of dropping work.
 - Record `rate_limit_wait_seconds` per channel.
 - Set the worker task timeout high enough to absorb a long wait (10 minutes).
+
+A burst of 100 would allow 100 immediate requests plus the 100/second refill, which can exceed the cap in a sliding one-second window. GCRA needs a burst of at least 1; burst 1 enforces the cap and lets the queue absorb bursts.
 
 ## Consequences
 

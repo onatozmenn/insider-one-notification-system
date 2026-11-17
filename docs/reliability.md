@@ -2,7 +2,9 @@
 
 ## 1. Delivery contract
 
-The system is **at-least-once**. A notification may be sent more than once if a worker crashes after the provider accepted it and before the database update commits. We make duplicates unlikely and harmless with two layers of idempotency, but we do not claim exactly-once delivery.
+The system is **at-least-once while PostgreSQL has accepted the work and Redis still holds the task**. A notification may be sent more than once if a worker crashes after the provider accepted it and before the database update commits. We reduce duplicate sends with two layers of idempotency, but we do not claim exactly-once delivery.
+
+A Redis flush or data-loss event can drop `queued` tasks. The reconciler only recovers `pending` rows; it cannot reconstruct tasks that were only in Redis. Production would use a transactional outbox or a durable queue with stronger guarantees. This limitation is deliberate for the assessment.
 
 Ordering is not guaranteed. A batch may finish out of order.
 
@@ -24,32 +26,44 @@ Task payload:
 }
 ```
 
-The task ID is the notification ID. It is unique for 24 hours, so the same notification cannot be enqueued twice in that window.
+The task ID is the notification ID. It is unique for 24 hours, so the same notification cannot be enqueued twice in that window. Manual retries use a fresh task ID (`<notification_id>:retry:<n>`) so the uniqueness window does not block an operator retry.
 
 ## 3. Worker lifecycle
 
 1. Dequeue a task.
-2. Claim the row with a guarded update: `queued` to `processing`.
-3. If the row is missing or not `queued`, stop. Another worker or a cancellation won.
+2. Claim the row with a guarded update. It accepts `pending`, `queued`, a due `scheduled`, or a stale `processing` row and moves it to `processing`. The same update increments `attempt_count` and sets `updated_at`.
+3. If no row changes, stop. Another worker, a cancellation, or a terminal state won.
 4. Wait for a channel token from the rate limiter.
 5. Re-check the status. If it is `cancelled`, stop.
 6. Call the provider with a 10-second timeout.
 7. Record the result:
    - `202`: `processing` to `accepted`.
-   - Transient error with retries left: `processing` to `queued`, increment attempts, set `next_attempt_at`.
+   - Transient error with retries left: `processing` to `queued`, set `next_attempt_at`.
    - Permanent error: `processing` to `failed`.
    - Last attempt: `processing` to `dead_letter`.
 8. Insert a `notification_events` row in the same transaction as the status update.
 9. Publish the event to Redis pub/sub for WebSocket clients.
 10. Acknowledge the task.
 
+`attempt_count` counts every provider attempt, including success and permanent failure. It increments at claim time, not only on retries.
+
 When a retry is scheduled, the worker returns an error. asynq retries the task with the configured delay. The database status is `queued`, which matches the fact that the task is waiting in Redis.
+
+### Stale claims
+
+A worker can crash after claiming a row but before recording a result. The row stays `processing` and a retried task would normally fail the `queued` guard. The claim condition includes:
+
+```sql
+status = 'processing' AND updated_at < now() - interval '2 minutes'
+```
+
+The lease is longer than the provider timeout, so a live worker is not preempted. If the original worker is alive but stalled longer than the lease, a duplicate provider call is possible. The provider idempotency header and the at-least-once contract cover that case.
 
 ## 4. Rate limiting
 
 - Limit: 100 provider requests per second per channel.
 - Implementation: `redis_rate` (GCRA) with a Redis key per channel.
-- Burst: 100.
+- Burst: 1. The queue absorbs bursts; the limiter smooths the rate. A larger burst would allow more than 100 requests in a sliding one-second window.
 - Shared across all worker replicas.
 - Workers wait for a token. They do not drop work and they do not bypass the limit.
 - The wait time is recorded in `rate_limit_wait_seconds`.
@@ -60,7 +74,7 @@ Key format:
 ratelimit:provider:{channel}
 ```
 
-If Redis is unavailable, the worker cannot get a token. The task fails, asynq retries it, and readiness reports the problem.
+If Redis is unavailable, the worker cannot get a token. The task fails, asynq retries it, and readiness reports the problem. Creates are still accepted and persisted as `pending`; the reconciler enqueues them when Redis returns.
 
 ## 5. Retry policy
 
@@ -103,7 +117,7 @@ WHERE status = 'dead_letter'
 ORDER BY updated_at DESC;
 ```
 
-A manual retry resets `attempt_count` to 0, sets `status` to `queued`, clears `last_error`, and enqueues a new task.
+A manual retry resets `attempt_count` to 0, sets `status` to `queued`, clears `last_error`, and enqueues a new task with a fresh task ID (`<notification_id>:retry:<n>`).
 
 ## 8. Idempotency
 
@@ -119,10 +133,11 @@ Two layers:
 
 ### Worker layer
 
-- asynq task ID is the notification ID, unique for 24 hours.
-- The state transition is a guarded update. Only one worker can move `queued` to `processing`.
+- asynq task ID is the notification ID, unique for 24 hours. Manual retries use a fresh task ID.
+- The state transition is a guarded update. Only one worker can claim a row for a given attempt.
 - The provider request includes `Idempotency-Key: <notification_id>` so a real provider could deduplicate. webhook.site ignores it, but the header is correct.
 - If a duplicate task arrives after the notification is `accepted`, the worker sees the status and stops.
+- A duplicate task that arrives while the row is `processing` waits for the lease to expire, then may retry. This is the at-least-once trade-off.
 
 ## 9. Cancellation
 
@@ -167,7 +182,7 @@ This is not a full transactional outbox. It covers the failure window with much 
 | Provider returns 500 | Retry with backoff | `queued` then `processing` again |
 | Provider returns 400 | `failed` | No retry |
 | Provider is slow | 10-second timeout, then retry | `last_error` records the timeout |
-| Redis is down | API persists but cannot enqueue; readiness fails | `pending` rows; recovery after Redis returns |
+| Redis is down | API persists creates as `pending` and returns 202; readiness fails; worker cannot consume | `pending` rows; reconciler enqueues after Redis returns |
 | PostgreSQL is down | API returns 503; worker retries | `/readyz` reports the failure |
 | Queue is flooded | Rate limiter throttles; queue depth grows | `/stats` and `/metrics` show depth and wait time |
 | Duplicate API request | Idempotency key replays the response | `Idempotent-Replayed: true` |

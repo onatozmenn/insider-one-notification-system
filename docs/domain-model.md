@@ -77,7 +77,7 @@ erDiagram
 | `scheduled` | Waiting for `scheduled_at`. Bonus. | No |
 | `queued` | In Redis, waiting for a worker. | No |
 | `processing` | Claimed by a worker, provider call in progress. | No |
-| `accepted` | Provider returned 202. | Yes |
+| `accepted` | Provider returned 202. | Yes, unless delivery receipts are enabled. |
 | `failed` | Permanent error. | Yes |
 | `cancelled` | Cancelled before processing. | Yes |
 | `dead_letter` | Retries exhausted. Needs attention. | Yes |
@@ -91,8 +91,8 @@ erDiagram
 stateDiagram-v2
     [*] --> pending: immediate
     [*] --> scheduled: future scheduled_at
-    [*] --> cancelled: rejected before insert
     pending --> queued: enqueue
+    pending --> processing: worker claims early
     pending --> cancelled: cancel
     scheduled --> processing: scheduled task fires
     scheduled --> cancelled: cancel
@@ -120,6 +120,8 @@ RETURNING *;
 
 If zero rows change, the worker stops. Another worker or a cancellation already moved the row.
 
+A `processing` row can be reclaimed after its lease expires. The guarded update adds `OR (status = 'processing' AND updated_at < now() - interval '2 minutes')`. This recovers a worker crash without leaving the notification stuck forever. The lease is longer than the provider timeout.
+
 ## 4. Tables
 
 ### `notifications`
@@ -134,7 +136,7 @@ If zero rows change, the worker stops. Another worker or a cancellation already 
 | `content` | `text` | Message body. |
 | `priority` | `text` | `high`, `normal`, `low`. Default `normal`. |
 | `status` | `text` | Check constraint with the statuses above. |
-| `attempt_count` | `int` | Starts at 0. Incremented on each provider attempt. |
+| `attempt_count` | `int` | Starts at 0. Incremented on every provider attempt, including success and permanent failure. |
 | `max_attempts` | `int` | Default 5. |
 | `scheduled_at` | `timestamptz` | Nullable. Future time for scheduled delivery. |
 | `next_attempt_at` | `timestamptz` | Nullable. Set when a retry is scheduled. |
@@ -264,6 +266,7 @@ GROUP BY status;
 | `partial_failure` | Terminal mix with at least one success and one `failed` or `dead_letter`. |
 | `failed` | All rows are `failed` or `dead_letter`. |
 | `cancelled` | All rows are `cancelled`. |
+| `mixed` | Any other terminal combination, such as `accepted` plus `cancelled`. |
 
 ## 8. Retention
 

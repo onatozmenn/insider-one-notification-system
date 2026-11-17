@@ -8,7 +8,7 @@ Accepted.
 
 The provider is an external HTTP service. A worker can crash after the provider accepts a message but before the database update commits. The client can retry a request after a timeout. Both cases can create duplicates.
 
-Exactly-once delivery across an external provider is not achievable without the provider's cooperation and a distributed transaction. The honest contract is at-least-once.
+Exactly-once delivery across an external provider is not achievable without the provider's cooperation and a distributed transaction. The honest contract is at-least-once while PostgreSQL holds the work and Redis holds the task. A Redis flush can drop queued tasks; the reconciler only recovers `pending` rows.
 
 ## Decision
 
@@ -25,10 +25,11 @@ Use at-least-once delivery and make duplicates unlikely and harmless:
 
 ### Worker layer
 
-- asynq task ID is the notification ID; the task is unique for 24 hours.
-- The status transition is a guarded update. Only one worker can move `queued` to `processing`.
+- asynq task ID is the notification ID; the task is unique for 24 hours. Manual retries use a fresh task ID (`<notification_id>:retry:<n>`).
+- The status transition is a guarded update. Only one worker can claim a row for a given attempt.
+- The claim accepts `pending`, `queued`, a due `scheduled`, or a stale `processing` row. The stale lease is longer than the provider timeout.
 - The provider request includes `Idempotency-Key: <notification_id>`.
-- A duplicate task that arrives after `accepted` is ignored.
+- A duplicate task that arrives after `accepted` is ignored. A duplicate task that arrives while the row is `processing` waits for the lease to expire, then may retry.
 
 ## Consequences
 
@@ -41,6 +42,8 @@ Positive:
 Negative:
 
 - A crash in the narrow window between the provider call and the database commit can still produce a duplicate. The provider idempotency header is the only defence.
+- A stale-lease recovery can duplicate a call if the original worker is alive but stalled. The lease is longer than the provider timeout to make this rare.
+- A Redis flush can drop queued tasks; the reconciler cannot recover them.
 - Idempotency records add a table and a cleanup job.
 - The API key is optional; without it, duplicate client requests are possible.
 

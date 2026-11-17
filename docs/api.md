@@ -1,6 +1,6 @@
 # API
 
-The OpenAPI file at `api/openapi.yaml` is the contract. This document explains the shape and the behaviour behind it.
+This document is the authoritative API contract until `api/openapi.yaml` lands in M1-7. After that, the OpenAPI file is the contract. This document explains the shape and the behaviour behind it.
 
 ## 1. Conventions
 
@@ -65,7 +65,7 @@ Content-Type: application/json
 Idempotency-Key: 7c1f5b0e-2a4d-4c8e-9f11-3b6a8d2e4f90
 
 {
-  "recipient": "+905551234567",
+  "recipient": "+15555550100",
   "channel": "sms",
   "content": "Your order has shipped.",
   "priority": "high"
@@ -92,11 +92,13 @@ X-Request-ID: req_01J...
 Content-Type: application/json
 ```
 
+If Redis is unavailable, the notification is persisted as `pending` and the response is still `202`. The reconciler enqueues it when Redis returns. Use an `Idempotency-Key` if the client may retry.
+
 ```json
 {
   "id": "0193b2f4-7c1a-7d3e-9a10-5f8c2d6e4b71",
   "batch_id": null,
-  "recipient": "+905551234567",
+  "recipient": "+15555550100",
   "channel": "sms",
   "subject": null,
   "content": "Your order has shipped.",
@@ -125,7 +127,7 @@ Idempotency-Key: batch-2026-11-17-001
 {
   "notifications": [
     {
-      "recipient": "+905551234567",
+      "recipient": "+15555550100",
       "channel": "sms",
       "content": "Flash sale starts now.",
       "priority": "high"
@@ -153,7 +155,7 @@ Response:
 {
   "batch_id": "0193b2f4-8d2b-7a4f-bc21-6a9d3e5f7c82",
   "total": 2,
-  "status": "pending",
+  "status": "processing",
   "status_url": "/api/v1/batches/0193b2f4-8d2b-7a4f-bc21-6a9d3e5f7c82",
   "created_at": "2026-11-17T17:00:00Z"
 }
@@ -191,7 +193,7 @@ Ordering is `created_at DESC, id DESC`.
     {
       "id": "0193b2f4-7c1a-7d3e-9a10-5f8c2d6e4b71",
       "batch_id": null,
-      "recipient": "+905551234567",
+      "recipient": "+15555550100",
       "channel": "sms",
       "subject": null,
       "content": "Your order has shipped.",
@@ -244,6 +246,8 @@ Allowed only when the status is `pending` or `scheduled`. Returns `200` with the
 GET /api/v1/batches/0193b2f4-8d2b-7a4f-bc21-6a9d3e5f7c82
 ```
 
+Batch status is derived from the children: `pending`, `processing`, `completed`, `partial_failure`, `failed`, `cancelled`, or `mixed`. If Redis was unavailable at creation time, the batch is accepted as `pending` and the reconciler enqueues it later.
+
 ```json
 {
   "batch_id": "0193b2f4-8d2b-7a4f-bc21-6a9d3e5f7c82",
@@ -286,7 +290,7 @@ GET /api/v1/stats
     "failed": 3,
     "dead_letter": 1
   },
-  "success_rate": 0.9975,
+  "success_rate": 0.9967,
   "p95_latency_ms": 180
 }
 ```
@@ -304,7 +308,7 @@ The numbers come from the database for the last five minutes and from asynq Insp
 | `idempotency_in_progress` | 409 | The original request with this key is still running. |
 | `payload_too_large` | 413 | Body exceeds 10 MB. |
 | `unsupported_media_type` | 415 | `Content-Type` is not JSON. |
-| `service_unavailable` | 503 | PostgreSQL or Redis is not ready. |
+| `service_unavailable` | 503 | PostgreSQL is not ready. A Redis outage accepts creates as `pending`; the reconciler enqueues them later. |
 | `internal_error` | 500 | Unexpected failure. The request ID is in the response. |
 
 ## 11. Idempotency

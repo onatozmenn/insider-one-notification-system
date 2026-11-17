@@ -120,7 +120,7 @@ The API and worker run from the same image with different commands. This is stil
 
 1. API validates the request and writes the notification plus a status event in one transaction.
 2. API enqueues an asynq task with the notification ID and correlation ID.
-3. Worker claims the row with a guarded update (`queued` to `processing`).
+3. Worker claims the row with a guarded update. It accepts `pending`, `queued`, a due `scheduled`, or a stale `processing` row and moves it to `processing`.
 4. Worker waits for the per-channel rate limiter.
 5. Worker calls the provider.
 6. Worker records the result, schedules a retry, or marks a terminal state.
@@ -158,7 +158,7 @@ Every choice is mature and boring. The assessment is about design and reliabilit
 | `scheduled` | Waiting for `scheduled_at`. Bonus. | No |
 | `queued` | In Redis, waiting for a worker. | No |
 | `processing` | Claimed by a worker, provider call in progress. | No |
-| `accepted` | Provider returned 202. | Yes |
+| `accepted` | Provider returned 202. | Yes, unless delivery receipts are enabled. |
 | `failed` | Permanent error. | Yes |
 | `cancelled` | Cancelled before processing. | Yes |
 | `dead_letter` | Retries exhausted. Needs attention. | Yes |
@@ -169,20 +169,24 @@ Every choice is mature and boring. The assessment is about design and reliabilit
 ### Transitions
 
 - `pending` to `queued` on enqueue.
+- `pending` to `processing` when a worker claims before the API writes `queued`.
 - `pending` or `scheduled` to `cancelled` on cancel.
 - `scheduled` to `processing` when the scheduled task fires and a worker claims it.
 - `queued` to `processing` when a worker claims the row.
+- `processing` to `processing` when the lease expires and a retry claims the row.
 - `processing` to `accepted` on provider 202.
 - `processing` to `queued` on a transient error with retries left.
 - `processing` to `failed` on a permanent error.
 - `processing` to `dead_letter` when retries are exhausted.
 - Every transition is a guarded SQL update. If zero rows change, the worker stops.
+- `attempt_count` increments on every provider attempt, including successful and permanent outcomes.
+- A `processing` row whose lease has expired can be reclaimed by a retried task. The lease is longer than the provider timeout.
 
 ### Channels and limits
 
 | Channel | Recipient | Required fields | Limits |
 | --- | --- | --- | --- |
-| `sms` | E.164, for example `+905551234567` | `content` | 160 characters |
+| `sms` | E.164, for example `+15555550100` | `content` | 160 characters |
 | `email` | Basic RFC 5322 check | `subject`, `content` | subject 200, content 50,000 characters |
 | `push` | Non-empty device token, max 512 | `content` | title 100, content 500 characters |
 
@@ -195,7 +199,7 @@ A batch has at most 1000 notifications. Validation is all-or-nothing: if one ite
 Two layers:
 
 1. API: optional `Idempotency-Key` header. The key and a hash of the request body are stored. A replay with the same body returns the original response and `Idempotent-Replayed: true`. A replay with a different body returns `422`.
-2. Worker: the asynq task ID is the notification ID, and the task is unique for a fixed TTL. The database state transition is the final guard. A notification can only move from `queued` to `processing` once.
+2. Worker: the asynq task ID is the notification ID, and the task is unique for a fixed TTL. The database state transition is the final guard. A notification can be claimed once per attempt; a transient failure returns it to `queued` and the next attempt claims it again. Manual retries use a fresh task ID so the uniqueness TTL does not block them.
 
 ### Retries
 
@@ -210,6 +214,7 @@ Two layers:
 ### Rate limiting
 
 - 100 provider requests per second per channel.
+- Burst is 1. The queue absorbs bursts; the limiter smooths the rate.
 - Shared across worker replicas through Redis.
 - Workers wait for a token; they do not drop work.
 - Record `rate_limit_wait_seconds` so the cost is visible.
@@ -220,7 +225,7 @@ Only `pending` and `scheduled` notifications can be cancelled. Anything else ret
 
 ### Delivery contract
 
-At-least-once. We prevent duplicate sends with idempotency keys and state guards. We do not promise exactly-once.
+At-least-once while PostgreSQL has accepted the work and Redis still holds the task. We reduce duplicate sends with idempotency keys and state guards, but we do not promise exactly-once. A Redis flush can drop queued tasks; the reconciler only recovers `pending` rows. Production would use a durable outbox or queue.
 
 ## 8. API rules
 

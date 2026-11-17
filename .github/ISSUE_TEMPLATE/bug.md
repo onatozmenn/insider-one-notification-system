@@ -22,7 +22,7 @@ A clear description of the expected behaviour.
 
 ## Evidence
 
-Logs, request IDs, status codes, screenshots, or the failing test.
+Logs, request IDs, status codes, screenshots, or the failing test. Redact secrets and personal data before posting; mask recipients.
 
 ## Environment
 

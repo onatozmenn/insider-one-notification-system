@@ -9,7 +9,7 @@ This is an assessment project, but it follows the same workflow as a small produ
 3. Make a small, focused change.
 4. Add or update tests.
 5. Open a pull request that links the issue.
-6. Wait for CI and AI review.
+6. Wait for AI review, and for CI once the workflow lands in M0-5.
 7. Address comments or explain why they do not apply.
 8. Squash merge.
 
@@ -86,6 +86,8 @@ CodeRabbit and cubic review pull requests. The comments are part of the review r
 | `bonus` | Bonus feature. |
 
 ## Local checks
+
+These targets arrive with the Go module (M0-2) and the CI workflow (M0-5).
 
 ```bash
 make fmt

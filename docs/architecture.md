@@ -80,7 +80,7 @@ sequenceDiagram
     A->>DB: pending -> queued
     A-->>C: 202 Accepted
     W->>R: dequeue task
-    W->>DB: queued -> processing
+    W->>DB: claim pending / queued / due scheduled -> processing
     W->>R: wait for channel token
     W->>P: POST /{uuid}
     P-->>W: 202 accepted
@@ -100,11 +100,13 @@ sequenceDiagram
 
 If the process dies after commit and before all tasks are enqueued, the reconciler finds `pending` rows older than one minute and enqueues them. This is the same recovery path used for a Redis outage.
 
+The enqueue and the `pending` to `queued` update are not atomic. A worker can dequeue the task before the API writes `queued`, so the worker claim accepts both `pending` and `queued`. This closes the race without a transactional outbox.
+
 ## 6. Module boundaries
 
 | Package | Owns | May import |
 | --- | --- | --- |
-| `internal/notification` | Domain types, validation, state machine, repository interfaces, application service | standard library, `platform` interfaces only |
+| `internal/notification` | Domain types, validation, state machine, repository interfaces, application service | standard library; interfaces it declares itself |
 | `internal/delivery` | Enqueue, worker, priority, rate limiter, retry policy | `notification`, `provider`, `platform` |
 | `internal/provider` | HTTP provider adapter, error classification, test double | standard library |
 | `internal/template` | Template parsing and rendering (bonus) | standard library |

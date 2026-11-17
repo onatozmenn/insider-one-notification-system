@@ -25,7 +25,7 @@
 | --- | --- | --- |
 | M1-1 | Database schema and migrations | Tables, constraints, indexes, up/down. |
 | M1-2 | Domain model and validation | Channel rules, batch limits, typed errors. |
-| M1-3 | Create single notification | 202, idempotency, event row, enqueue. |
+| M1-3 | Create and persist a single notification | 202, transaction, event row, API idempotency. Enqueue arrives in M2-1. |
 | M1-4 | Get and list notifications | Filters, pagination, stable order. |
 | M1-5 | Cancel notification | 200 for pending/scheduled, 409 otherwise. |
 | M1-6 | Batch create and summary | Up to 1000, atomic validation, derived status. |
@@ -35,11 +35,11 @@
 
 | Issue | Title | Acceptance |
 | --- | --- | --- |
-| M2-1 | Queue client and enqueue | asynq client, task payload, task IDs. |
+| M2-1 | Queue client and enqueue | asynq client, task payload, task IDs, move to `queued`. |
 | M2-2 | Worker and state guards | Claim, transition, event, ack. |
 | M2-3 | Provider adapter | 202 success, typed errors, timeout. |
 | M2-4 | Priority queues | `high`, `normal`, `low` with weights. |
-| M2-5 | Per-channel rate limiting | 100/s shared through Redis. |
+| M2-5 | Per-channel rate limiting | 100/s shared through Redis, burst 1. |
 | M2-6 | Retry and dead letter | Classification, backoff, max attempts. |
 | M2-7 | Reconciler | Pending rows enqueued after a crash or Redis outage. |
 
@@ -50,6 +50,7 @@
 | M3-1 | Worker idempotency | Unique task, guarded transition, duplicate test. |
 | M3-2 | Cancellation races | Worker re-checks status before the provider call. |
 | M3-3 | Failure injection tests | Provider 400, 429, 500, timeout, duplicate task. |
+| M3-4 | Stale claim recovery | A crashed worker's `processing` row is reclaimed after the lease. |
 
 ### M4 — Observability
 
