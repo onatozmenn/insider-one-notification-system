@@ -94,7 +94,9 @@ func (c *Client) Send(ctx context.Context, message Message) (Result, error) {
 	if err != nil {
 		return Result{}, &Error{Transient: true, Message: "provider request failed", Err: err}
 	}
-	defer response.Body.Close()
+	defer func() {
+		_ = response.Body.Close()
+	}()
 
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if readErr != nil {
