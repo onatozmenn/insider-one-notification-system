@@ -107,13 +107,13 @@ Migrations live in `migrations/` and are embedded in the `migrate` command.
 
 ```bash
 # Apply all migrations
-docker compose run --rm migrate up
+docker compose run --rm --entrypoint /app/migrate migrate up
 
 # Roll back one migration
-docker compose run --rm migrate down 1
+docker compose run --rm --entrypoint /app/migrate migrate down 1
 
 # Check the current version
-docker compose run --rm migrate version
+docker compose run --rm --entrypoint /app/migrate migrate version
 ```
 
 The `migrate` service runs automatically before the API and worker start. It uses an advisory lock so two starts do not race.

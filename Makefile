@@ -1,4 +1,4 @@
-.PHONY: up down logs build test test-unit test-integration lint fmt migrate-up migrate-down openapi-lint smoke
+.PHONY: up down logs build test test-unit test-integration lint fmt migrate-up migrate-down migrate-version openapi-lint smoke
 
 up:
 	docker compose up --build
@@ -28,10 +28,13 @@ fmt:
 	gofmt -w .
 
 migrate-up:
-	docker compose run --rm migrate
+	docker compose run --rm --entrypoint /app/migrate migrate up
 
 migrate-down:
-	docker compose run --rm migrate down 1
+	docker compose run --rm --entrypoint /app/migrate migrate down 1
+
+migrate-version:
+	docker compose run --rm --entrypoint /app/migrate migrate version
 
 openapi-lint:
 	@echo "OpenAPI lint lands with M1-7"
