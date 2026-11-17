@@ -169,7 +169,7 @@ ORDER BY created_at
 LIMIT 100;
 ```
 
-It enqueues each row with the notification ID as the asynq task ID. Pending rows move to `queued`; due scheduled rows keep `scheduled`; stale queued rows keep `queued`. Duplicate tasks are collapsed by the task ID and the database state guards. The same loop recovers from a short Redis outage, a lost `queued` task, and a scheduled notification whose first enqueue failed. It cannot reconstruct a task that is still in flight and may duplicate a provider call; the delivery contract remains at-least-once.
+It enqueues each row with the notification ID as the asynq task ID. If an archived task still owns that ID, the reconciler deletes the archive entry first; if the unique lock survives, it creates a fresh recovery task ID. Pending rows move to `queued`; due scheduled rows keep `scheduled`; stale queued rows keep `queued`. The same loop recovers from a short Redis outage, a lost `queued` task, an archived task, and a scheduled notification whose first enqueue failed. It cannot reconstruct a task that is still in flight and may duplicate a provider call; the delivery contract remains at-least-once.
 
 This is not a full transactional outbox. It covers the failure window with much less code, and the trade-off is documented in [decisions/0002](decisions/0002-postgres-redis-asynq.md) and [decisions/0006](decisions/0006-recovery-and-retry-budget.md).
 

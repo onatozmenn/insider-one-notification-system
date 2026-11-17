@@ -21,7 +21,7 @@ Together these meant the documented at-least-once recovery did not cover every s
   - `pending` older than one minute;
   - `scheduled` whose `scheduled_at` is due;
   - `queued` whose `updated_at` is older than 15 minutes. A partial index on `(updated_at) WHERE status = 'queued'` supports this scan.
-- Re-enqueue uses the notification ID as the asynq task ID. Duplicates are collapsed while the task exists, and the database state guards remain the final authority. Pending rows are marked `queued` after a successful enqueue; due scheduled and stale queued rows keep their status.
+- Re-enqueue uses the notification ID as the asynq task ID. If an archived task still owns the ID, the reconciler deletes it before re-enqueueing; if a unique lock survives and blocks the same ID, it falls back to a fresh recovery ID. Pending rows are marked `queued` after a successful enqueue; due scheduled and stale queued rows keep their status.
 - asynq transport retries are separate from provider attempts. `TransportMaxRetries` is 100 for infrastructure failures; provider attempts are still bounded by `notifications.attempt_count` and `max_attempts`. Backoff uses the database attempt count, not the asynq retry count.
 - A stale `processing` row at `max_attempts` is moved to `dead_letter` with `last_error = "processing lease expired after final attempt"`. `Claim` never reclaims a stale row at the attempt limit.
 - Expired idempotency rows are deleted when read, and an hourly API cleanup removes the rest. Reusing a key after 24 hours now creates a new resource.
