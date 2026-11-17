@@ -7,6 +7,16 @@
 - Every PR must keep `main` runnable.
 - The definition of done in [AGENTS.md](../AGENTS.md) applies to every item.
 
+### Current status (2026-11-17)
+
+- M0 complete.
+- M1 complete, including OpenAPI and Swagger UI.
+- M2 complete.
+- M3: idempotency, cancellation races, failure injection, and stale claims are implemented. Repository integration tests are next.
+- M4 complete.
+- M5: Compose, README, tests, CI, and OpenAPI validation are in place. The release and smoke target are pending.
+- M6: scheduled notifications, failure handling, and CI/CD are done. Templates, WebSocket updates, distributed tracing, the load test, and the metrics profile are pending.
+
 ## 2. Milestones
 
 ### M0 — Foundation

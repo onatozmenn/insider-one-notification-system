@@ -1,19 +1,20 @@
 # Insider One — Event-Driven Notification System
 
-A scalable notification service that accepts SMS, email, and push requests, processes them asynchronously, delivers them through a simulated provider, and exposes status, metrics, and logs.
+A production-shaped notification service that accepts SMS, email, and push requests, processes them asynchronously, delivers them through a simulated provider, and exposes status, metrics, and logs.
 
-Built for the **Insider One Software Engineer Assessment 2026** in Go, PostgreSQL, and Redis.
+Built for the **Insider One Software Engineer Assessment 2026** with **Go 1.26**, **PostgreSQL 16**, and **Redis 7**.
 
-> **Status:** the core MVP is running. The API, PostgreSQL schema, Redis queue, worker, provider calls, retries, and dead-letter handling are implemented. Observability, OpenAPI, and the bonus features are in progress. The architecture and contracts are in [`docs/`](docs/).
+> **Status:** core MVP, OpenAPI, Prometheus metrics, scheduled notifications, failure handling, and CI/CD are implemented. Templates, WebSocket updates, distributed tracing, and the load test remain on the bonus backlog.
 
 ## What it does
 
 - Create one notification or a batch of up to 1000.
-- Query by notification ID or batch ID. List with status, channel, and date filters plus pagination.
+- Query by notification ID or batch ID. List with status, channel, batch, and date filters plus pagination.
 - Cancel pending or scheduled notifications.
-- Process asynchronously with priority queues, 100 messages/second per channel, retries, backoff, and dead letters.
-- Reduce duplicate sends with idempotency keys and guarded state transitions. The delivery contract remains at-least-once.
-- Expose Prometheus metrics, structured logs with correlation IDs, health checks, and a human-readable stats endpoint.
+- Process asynchronously with weighted priority queues, a shared 100 messages/second limit per channel, retries, and dead-letter handling.
+- Reduce duplicate sends with API idempotency keys, unique task IDs, and guarded state transitions. The delivery contract remains at-least-once.
+- Deliver through webhook.site, with `202 accepted` treated as provider acceptance.
+- Expose Prometheus metrics, JSON logs with correlation IDs, health checks, and a human-readable stats endpoint.
 
 ## Architecture
 
@@ -33,7 +34,11 @@ flowchart LR
     Redis -. pub/sub .-> API
 ```
 
-The API and worker are two processes from the same codebase. PostgreSQL is the source of truth; Redis holds the queue, rate limiter, and pub/sub state. This is a modular monolith, not a microservice fleet. See [docs/architecture.md](docs/architecture.md) for the full picture and [docs/decisions/](docs/decisions/) for the trade-offs.
+The API and worker are two processes from the same codebase. PostgreSQL is the source of truth; Redis holds the queue, rate limiter, and pub/sub state. This is a modular monolith, not a microservice fleet.
+
+The worker waits for a channel token before claiming a row, so the processing lease only covers the provider call. A guarded claim accepts `pending`, `queued`, a due `scheduled`, or a stale `processing` row. A reconciler re-enqueues `pending` rows after a crash or a short Redis outage.
+
+See [docs/architecture.md](docs/architecture.md) for the full design and [docs/decisions/](docs/decisions/) for the trade-offs.
 
 ## Design highlights
 
@@ -41,11 +46,13 @@ The API and worker are two processes from the same codebase. PostgreSQL is the s
 | --- | --- |
 | Architecture | Modular monolith with `api`, `worker`, and `migrate` commands. |
 | Queue | asynq on Redis with weighted `high`, `normal`, `low` queues. |
-| Rate limiting | `redis_rate` GCRA, 100 requests/second per channel, shared across replicas. |
-| Delivery | At-least-once with exponential backoff, jitter, and a dead-letter state. |
+| Rate limiting | `redis_rate` GCRA, 100 requests/second per channel, burst 1, shared across replicas. |
+| Delivery | At-least-once with exponential backoff, jitter, `Retry-After`, and a dead-letter state. |
 | Idempotency | API `Idempotency-Key` plus worker task IDs and guarded transitions. |
 | Recovery | A reconciler re-enqueues `pending` rows after a crash or a short Redis outage. |
+| Scheduling | `scheduled_at` uses asynq `ProcessAt`; cancellation is checked when the task fires. |
 | Observability | Prometheus metrics, JSON logs, `X-Request-ID`, `/healthz`, `/readyz`, `/api/v1/stats`. |
+| API contract | OpenAPI 3.1, Swagger UI, and Redocly lint in CI. |
 | Delivery simulation | webhook.site; tests use a local `httptest` provider. |
 
 ## Quickstart
@@ -57,20 +64,31 @@ cp .env.example .env
 docker compose up --build
 ```
 
-If port `8080` is already in use, set `GATEWAY_PORT=8090` in `.env` and replace `8080` with `8090` below.
+Before expecting delivery, replace `PROVIDER_BASE_URL` in `.env` with your own URL from [webhook.site](https://webhook.site). Configure it to return:
 
-The stack exposes:
+- Status: `202`
+- Content type: `application/json`
+- Body:
+
+```json
+{
+  "messageId": "3f2b9c1e-8a4d-4f6e-9b2a-1c7d5e8f0a3b",
+  "status": "accepted",
+  "timestamp": "2026-11-17T19:00:00Z"
+}
+```
+
+The URL is public and anonymous webhook.site URLs expire after seven days. If port `8080` is already in use, set `GATEWAY_PORT=8090` in `.env` and replace `8080` with `8090` below.
 
 | URL | What |
 | --- | --- |
 | `http://localhost:8080/docs` | Swagger UI |
+| `http://localhost:8080/openapi.yaml` | OpenAPI 3.1 spec |
 | `http://localhost:8080/api/v1/stats` | Queue depth, success rate, p95 |
 | `http://localhost:8080/metrics` | API Prometheus metrics |
 | `http://localhost:9091/metrics` | Worker Prometheus metrics |
 | `http://localhost:8080/healthz` | Liveness |
 | `http://localhost:8080/readyz` | PostgreSQL and Redis readiness |
-
-The `PROVIDER_BASE_URL` in `.env.example` is a placeholder. Create your own URL at webhook.site, configure it to return `202` with the provider response body, and replace the value before running the demo. The URL is public and anonymous URLs expire after seven days.
 
 ## API examples
 
@@ -112,22 +130,77 @@ curl -s "http://localhost:8080/api/v1/batches/${BATCH_ID}"
 curl -s 'http://localhost:8080/api/v1/notifications?status=accepted&channel=sms&page=1&page_size=20'
 ```
 
-Cancel a pending notification:
+Cancel a pending or scheduled notification:
 
 ```bash
 curl -s -X POST "http://localhost:8080/api/v1/notifications/${NOTIFICATION_ID}/cancel"
 ```
 
+Schedule a notification:
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/notifications \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "recipient": "+15555550100",
+    "channel": "sms",
+    "content": "This is scheduled.",
+    "scheduled_at": "2026-11-18T10:00:00Z"
+  }'
+```
+
+Inspect stats:
+
+```bash
+curl -s http://localhost:8080/api/v1/stats
+```
+
+```json
+{
+  "queue_depth": {"high": 0, "normal": 2, "low": 0},
+  "window": "5m",
+  "counts": {"accepted": 3, "failed": 0, "dead_letter": 0},
+  "success_rate": 1,
+  "p95_latency_ms": 1198
+}
+```
+
+## Delivery behavior
+
+- **Priority:** `high` 6, `normal` 3, `low` 1. Low-priority work is delayed, not starved.
+- **Rate limit:** 100 provider calls per second per channel, shared through Redis. The token wait happens before the claim.
+- **Retries:** up to 5 attempts by default. Exponential backoff with full jitter, capped at 30 seconds. `Retry-After` is honoured.
+- **Error classes:** `408`, `425`, `429`, `5xx`, timeouts, and network errors are transient. Other `4xx` are permanent.
+- **Dead letter:** exhausted transient retries move to `dead_letter` with the last error and attempt count.
+- **Idempotency:** the API stores a key and request hash and replays the original resource. The worker uses the notification ID as the task ID and guards every transition.
+- **Cancellation:** only `pending` and `scheduled`; the worker re-checks before the provider call.
+- **Recovery:** a reconciler scans `pending` rows every 30 seconds. A stale `processing` row can be reclaimed after the lease.
+
 ## Testing
 
 ```bash
-make test          # unit tests with the race detector
+make test          # unit and contract tests with the race detector
 make test-unit
+make openapi-lint  # Redocly lint for the OpenAPI spec
 ```
 
-The integration and smoke profiles are still in progress. Provider tests use a local `httptest` server and do not depend on webhook.site.
+The current suite covers validation, idempotency and service rules, API handlers, provider responses (202, 400, 429, 500, timeout), worker transitions, retry backoff, and priority mapping. Provider tests use `httptest` and do not depend on webhook.site.
 
-The integration tests use real PostgreSQL and Redis via testcontainers locally and service containers in CI. The provider tests use `httptest`; they do not depend on webhook.site.
+Repository integration tests with testcontainers and a Compose smoke target are the next additions. The manual end-to-end checks below were run against the Compose stack.
+
+## Verified end-to-end
+
+On 2026-11-17, against the local Compose stack and webhook.site:
+
+- Single notification: `202` with `queued`, then `accepted` with attempt 1 and a provider message ID.
+- Batch of three: `processing` with queued counts, then all three accepted.
+- Failure path with a webhook returning `500`: retries were logged and the notification reached `dead_letter` after 3 attempts with `provider returned 500`.
+- Scheduled notification: started as `scheduled`, then `accepted` after the scheduled time.
+- Scheduled cancellation: cancelled before the scheduled time and remained `cancelled` with no provider message ID.
+- Reconciler: recovered six pre-existing `pending` rows and queued them.
+- Metrics: API and worker `/metrics` exposed HTTP, queue-depth, provider, status, rate-limit, and processing metrics.
+- Stats: `accepted: 3`, `success_rate: 1`, `p95_latency_ms: 1198`.
+- CI: test, lint, Docker build, and OpenAPI lint passed.
 
 ## Documentation
 
@@ -142,11 +215,14 @@ The integration tests use real PostgreSQL and Redis via testcontainers locally a
 | [docs/testing.md](docs/testing.md) | Test strategy and commands. |
 | [docs/operations.md](docs/operations.md) | Compose, configuration, migrations, runbook. |
 | [docs/roadmap.md](docs/roadmap.md) | Milestones, issues, commit plan. |
+| [docs/demo.md](docs/demo.md) | A step-by-step demo with expected results. |
 
 ## Limitations
 
 - At-least-once delivery, not exactly-once.
 - No authentication or multi-tenancy; the API is intended for a local demo.
-- webhook.site is a simulation, not a real provider. `accepted` means the provider accepted the message, not that a user received it.
+- webhook.site is a simulation. `accepted` means the provider accepted the message, not that a user received it.
 - A Redis flush loses queued tasks. The reconciler recovers `pending` rows, not in-flight tasks.
 - Offset pagination can shift when new rows arrive during a scan.
+- Templates, WebSocket updates, and distributed tracing are on the bonus backlog.
+- Repository integration tests and the Compose smoke target are not implemented yet.

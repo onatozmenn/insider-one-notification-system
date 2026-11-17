@@ -19,7 +19,7 @@ test-unit:
 	go test -race ./...
 
 test-integration:
-	go test -race ./...
+	@echo "Integration tests are planned; run 'make test' for the current suite."
 
 lint:
 	golangci-lint run
@@ -40,4 +40,4 @@ openapi-lint:
 	npx --yes @redocly/cli@latest lint api/openapi.yaml
 
 smoke:
-	@echo "Smoke test lands with M5-3"
+	@echo "Smoke test is planned; use docs/demo.md for a manual walkthrough."

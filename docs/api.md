@@ -1,6 +1,6 @@
 # API
 
-This document is the authoritative API contract until `api/openapi.yaml` lands in M1-7. After that, the OpenAPI file is the contract. This document explains the shape and the behaviour behind it.
+The OpenAPI file at `api/openapi.yaml` is the contract. This document explains the shape and the behaviour behind it.
 
 ## 1. Conventions
 
@@ -47,7 +47,7 @@ This document is the authoritative API contract until `api/openapi.yaml` lands i
 | `GET` | `/openapi.yaml` | OpenAPI document. | `200` |
 | `GET` | `/docs` | Swagger UI, served through the gateway. | `200` |
 
-Bonus endpoints:
+Bonus endpoints (not in the current OpenAPI spec):
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -79,7 +79,7 @@ Idempotency-Key: 7c1f5b0e-2a4d-4c8e-9f11-3b6a8d2e4f90
 | `content` | string | yes | Body. Limits depend on the channel. |
 | `subject` | string | email only | Email subject. Also used as the push title. |
 | `priority` | string | no | `high`, `normal`, `low`. Default `normal`. |
-| `scheduled_at` | string | no | RFC3339. Bonus feature. Future, at most 30 days ahead. |
+| `scheduled_at` | string | no | RFC3339. Future, at most 30 days ahead. |
 | `template` | string | no | Template name. Bonus feature. |
 | `variables` | object | no | Template values. Bonus feature. |
 

@@ -169,7 +169,7 @@ It enqueues each row and moves it to `queued`. The same loop recovers from a sho
 
 This is not a full transactional outbox. It covers the failure window with much less code, and the trade-off is documented in [decisions/0002](decisions/0002-postgres-redis-asynq.md).
 
-## 11. Scheduled notifications (bonus)
+## 11. Scheduled notifications
 
 - `scheduled_at` must be in the future and at most 30 days ahead.
 - The notification is inserted as `scheduled`.
