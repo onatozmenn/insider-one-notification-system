@@ -118,9 +118,8 @@ A `processing` row is owned by the worker until it writes a retry or terminal st
 | `internal/notification` | Domain types, validation, state machine, repository interfaces, application service | standard library; interfaces it declares itself |
 | `internal/delivery` | Enqueue, worker, priority, rate limiter, retry policy | `notification`, `provider`, `platform` |
 | `internal/provider` | HTTP provider adapter, error classification, test double | standard library |
-| `internal/template` | Template parsing and rendering (bonus) | standard library |
-| `internal/realtime` | WebSocket hub, Redis pub/sub (bonus) | `notification`, `platform` |
-| `internal/platform` | Config, logging, metrics, PostgreSQL, Redis, HTTP server, shutdown | infrastructure libraries |
+| `internal/realtime` | WebSocket hub, Redis pub/sub status events | standard library, Redis client |
+| `internal/platform` | Config, logging, metrics, PostgreSQL, Redis, tracing, HTTP server, shutdown | infrastructure libraries |
 
 Rules:
 
@@ -136,7 +135,7 @@ Rules:
 - Notification and batch records.
 - Status history.
 - Idempotency records.
-- Templates (bonus).
+- Templates.
 
 **Redis** owns:
 
@@ -160,7 +159,7 @@ Redis is treated as disposable. If it is flushed, the reconciler re-enqueues `pe
 | --- | --- | --- |
 | Provider is down or slow | Worker retries with backoff; queue depth grows | Provider recovers; tasks drain |
 | Provider returns a non-retryable 4xx | Notification moves to `failed` | Operator fixes payload or recipient |
-| Retries exhausted | Notification moves to `dead_letter` | Inspect, fix, manual retry (bonus) |
+| Retries exhausted | Notification moves to `dead_letter` | Inspect, fix, then `POST /notifications/{id}/retry` |
 | Redis is down | API can persist but cannot enqueue; readiness fails | Redis returns; reconciler enqueues pending rows |
 | PostgreSQL is down | API returns 503; worker cannot update state | PostgreSQL returns; in-flight tasks retry |
 | Worker crashes mid-call | Task is retried; provider may see a duplicate | DB state guard and provider idempotency header |

@@ -11,8 +11,8 @@ The OpenAPI file at `api/openapi.yaml` is the contract. This document explains t
 - Every response includes `X-Request-ID`. If the client sends one, the server keeps it.
 - `Idempotency-Key` is optional on create endpoints. When present, it must be 1 to 255 characters.
 - Request body limit: 10 MB.
-- Create endpoints return `202 Accepted` with a `Location` header.
-- Read and cancel endpoints return `200 OK`.
+- Create endpoints return `202 Accepted` with a `Location` header. Template creation returns `201 Created`.
+- Read and cancel endpoints return `200 OK`. Retry returns `202 Accepted`.
 - Errors use one shape:
 
 ```json
@@ -39,23 +39,18 @@ The OpenAPI file at `api/openapi.yaml` is the contract. This document explains t
 | `GET` | `/notifications/{id}` | Get one notification. | `200` |
 | `GET` | `/notifications` | List with filters and pagination. | `200` |
 | `POST` | `/notifications/{id}/cancel` | Cancel a pending or scheduled notification. | `200` |
+| `POST` | `/notifications/{id}/retry` | Retry a failed or dead-letter notification. | `202` |
+| `POST` | `/templates` | Create a message template. | `201` |
+| `GET` | `/templates` | List templates. | `200` |
+| `GET` | `/templates/{id}` | Get a template. | `200` |
 | `GET` | `/batches/{id}` | Get a batch summary and status counts. | `200` |
 | `GET` | `/stats` | Queue depth, recent counts, success rate, latency. | `200` |
+| `GET` | `/ws` | WebSocket status updates. | `101` |
 | `GET` | `/healthz` | Liveness. | `200` |
 | `GET` | `/readyz` | PostgreSQL and Redis readiness. | `200` or `503` |
 | `GET` | `/metrics` | Prometheus metrics. | `200` |
 | `GET` | `/openapi.yaml` | OpenAPI document. | `200` |
 | `GET` | `/docs` | Swagger UI, served through the gateway. | `200` |
-
-Bonus endpoints (not in the current OpenAPI spec):
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `POST` | `/templates` | Create a message template. |
-| `GET` | `/templates` | List templates. |
-| `GET` | `/templates/{id}` | Get a template. |
-| `POST` | `/notifications/{id}/retry` | Retry a failed or dead-letter notification. |
-| `GET` | `/ws` | WebSocket status updates. |
 
 ## 3. Create one notification
 
@@ -76,12 +71,12 @@ Idempotency-Key: 7c1f5b0e-2a4d-4c8e-9f11-3b6a8d2e4f90
 | --- | --- | --- | --- |
 | `recipient` | string | yes | Channel-specific format. |
 | `channel` | string | yes | `sms`, `email`, or `push`. |
-| `content` | string | yes | Body. Limits depend on the channel. |
-| `subject` | string | email only | Email subject. Also used as the push title. |
+| `content` | string | unless `template` | Body. Limits depend on the channel. Overridden by the template. |
+| `subject` | string | email only | Email subject. Also used as the push title. Overridden by the template. |
 | `priority` | string | no | `high`, `normal`, `low`. Default `normal`. |
 | `scheduled_at` | string | no | RFC3339. Future, at most 30 days ahead. |
-| `template` | string | no | Template name. Bonus feature. |
-| `variables` | object | no | Template values. Bonus feature. |
+| `template` | string | no | Template name. The rendered content replaces `content` and `subject`. |
+| `variables` | object | no | Values for `{{placeholder}}` variables. Requires `template`. |
 
 Response:
 
@@ -93,6 +88,22 @@ Content-Type: application/json
 ```
 
 If Redis is unavailable, the notification is persisted as `pending` and the response is still `202`. The reconciler enqueues it when Redis returns. Use an `Idempotency-Key` if the client may retry.
+
+Using a template instead of inline content:
+
+```http
+POST /api/v1/notifications
+Content-Type: application/json
+
+{
+  "recipient": "+15555550100",
+  "channel": "sms",
+  "template": "welcome",
+  "variables": {"name": "Onat", "code": "ABC"}
+}
+```
+
+The API loads the named template, renders `{{name}}` and `{{code}}`, and stores the rendered body. A missing variable returns `422` with `variables.<name>` in `details`; an unknown template returns `404`.
 
 ```json
 {
@@ -240,7 +251,57 @@ Allowed only when the status is `pending` or `scheduled`. Returns `200` with the
 }
 ```
 
-## 8. Batch summary
+## 8. Retry a notification
+
+```http
+POST /api/v1/notifications/0193b2f4-7c1a-7d3e-9a10-5f8c2d6e4b71/retry
+```
+
+Allowed only when the status is `failed` or `dead_letter`. The API resets the row to `pending`, clears `last_error` and `next_attempt_at`, resets `attempt_count` to 0, and enqueues a fresh asynq task with a new task ID. The unique lock of the original task does not block the retry.
+
+Returns `202` with the updated notification. `404` if the ID does not exist; `409 not_retryable` for any other status. If Redis is unavailable, the row stays `pending` and the reconciler picks it up.
+
+## 9. Templates
+
+```http
+POST /api/v1/templates
+Content-Type: application/json
+
+{
+  "name": "welcome",
+  "channel": "sms",
+  "content": "Hello {{name}}, your code is {{code}}"
+}
+```
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `name` | string | yes | Unique, 1 to 100 characters. |
+| `channel` | string | yes | `sms`, `email`, or `push`. Channel limits apply to the template body. |
+| `subject` | string | email only | Required for email; optional title for push; rejected for SMS. |
+| `content` | string | yes | Body with optional `{{variable}}` placeholders. |
+
+`GET /api/v1/templates` returns `{"data":[...]}` ordered by name. `GET /api/v1/templates/{id}` returns one template. A duplicate name returns `409 template_exists`.
+
+Templates are rendered at request time; there is no template versioning or partial rendering.
+
+## 10. WebSocket updates
+
+```text
+GET /api/v1/ws?notification_id=<uuid>
+```
+
+The connection opens with a snapshot, then streams status events:
+
+```json
+{"type":"snapshot","notification":{"id":"...","status":"scheduled"}}
+{"type":"status","event":{"notification_id":"...","channel":"sms","status":"processing","attempt_count":1,"updated_at":"2026-11-17T17:00:01Z"}}
+{"type":"status","event":{"notification_id":"...","channel":"sms","status":"accepted","attempt_count":1,"updated_at":"2026-11-17T17:00:02Z"}}
+```
+
+The worker publishes events to the Redis channel `notification.events`; the API hub filters by notification ID. Events are best-effort: there is no replay buffer, so a reconnecting client should re-read the notification. The endpoint is disabled when `WS_ENABLED=false`.
+
+## 11. Batch summary
 
 ```http
 GET /api/v1/batches/0193b2f4-8d2b-7a4f-bc21-6a9d3e5f7c82
@@ -271,7 +332,7 @@ Batch status is derived from the children: `pending`, `processing`, `completed`,
 }
 ```
 
-## 9. Stats
+## 12. Stats
 
 ```http
 GET /api/v1/stats
@@ -297,13 +358,15 @@ GET /api/v1/stats
 
 The numbers come from the database for the last five minutes and from asynq Inspector for queue depth. Prometheus metrics remain the raw source.
 
-## 10. Error codes
+## 13. Error codes
 
 | Code | HTTP | When |
 | --- | --- | --- |
-| `validation_error` | 422 | Invalid field, unknown channel, content too long. |
-| `not_found` | 404 | Notification or batch does not exist. |
+| `validation_error` | 422 | Invalid field, unknown channel, content too long, missing template variable. |
+| `not_found` | 404 | Notification, batch, or template does not exist. |
 | `not_cancellable` | 409 | Cancellation is not allowed in the current status. |
+| `not_retryable` | 409 | Retry is only allowed for `failed` or `dead_letter`. |
+| `template_exists` | 409 | A template with this name already exists. |
 | `idempotency_conflict` | 422 | Same key, different request body. |
 | `idempotency_in_progress` | 409 | The original request with this key is still running. |
 | `payload_too_large` | 413 | Body exceeds 10 MB. |
@@ -311,7 +374,7 @@ The numbers come from the database for the last five minutes and from asynq Insp
 | `service_unavailable` | 503 | PostgreSQL is not ready. A Redis outage accepts creates as `pending`; the reconciler enqueues them later. |
 | `internal_error` | 500 | Unexpected failure. The request ID is in the response. |
 
-## 11. Idempotency
+## 14. Idempotency
 
 - The key is scoped by endpoint. The same key on a different endpoint is a different request.
 - The server stores a SHA-256 hash of the canonical JSON body.
@@ -324,7 +387,7 @@ The numbers come from the database for the last five minutes and from asynq Insp
 - If the transaction fails, nothing is committed and a retry starts cleanly. A concurrent request with the same key gets a unique violation, reads the completed row, and replays the resource.
 - Without a key, two requests create two distinct notifications with different IDs. The worker guard only prevents repeated work for the same notification ID; it cannot deduplicate separate notifications.
 
-## 12. OpenAPI and Swagger
+## 15. OpenAPI and Swagger
 
 - Spec: `api/openapi.yaml`.
 - Swagger UI: `http://localhost:8080/docs`.

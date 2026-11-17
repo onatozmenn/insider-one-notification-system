@@ -27,4 +27,4 @@ This folder explains the design behind the notification system. Start with the p
 
 ## Status
 
-The core MVP is implemented. The documents describe the target design; when code and docs disagree, fix one of them in the same pull request. Design changes go through an ADR.
+The MVP and all bonus features are implemented. The documents describe the current design; when code and docs disagree, fix one of them in the same pull request. Design changes go through an ADR.

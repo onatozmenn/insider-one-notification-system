@@ -2,13 +2,18 @@ openapi: 3.1.0
 
 info:
   title: Insider One Notification System API
-  version: 1.0.0
+  version: 1.1.0
   description: |
     Event-driven notification API for SMS, email, and push.
 
     Create one notification or a batch, query status, list with filters,
-    cancel pending work, and inspect delivery stats. The API is asynchronous:
-    a create returns `202 Accepted` while the worker handles delivery.
+    cancel pending work, retry failed deliveries, render templates, and inspect
+    delivery stats. The API is asynchronous: a create returns `202 Accepted`
+    while the worker handles delivery.
+
+    Live status updates are available over WebSocket at
+    `GET /api/v1/ws?notification_id=<uuid>`. The connection opens with a
+    snapshot frame and then streams status events.
 
 servers:
   - url: http://localhost:8080

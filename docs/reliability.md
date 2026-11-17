@@ -108,7 +108,7 @@ The provider adapter returns a typed error with `Transient bool`, `RetryAfter ti
 
 When the last attempt fails with a transient error, the notification moves to `dead_letter`. The task is archived by asynq. The event row stores the last error and attempt count.
 
-Operators can inspect dead letters through the API (bonus) or directly in PostgreSQL:
+Operators can inspect dead letters through `GET /api/v1/notifications?status=dead_letter` or directly in PostgreSQL:
 
 ```sql
 SELECT id, channel, attempt_count, last_error, updated_at

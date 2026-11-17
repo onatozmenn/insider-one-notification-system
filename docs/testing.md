@@ -6,12 +6,13 @@ The test suite has four layers. Each layer has a clear job; we do not duplicate 
 
 | Layer | What it proves | Speed | Status |
 | --- | --- | --- | --- |
-| Unit | Pure rules: validation, state transitions, backoff, queue selection. | Milliseconds | Implemented |
+| Unit | Pure rules: validation, state transitions, backoff, queue selection, template rendering. | Milliseconds | Implemented |
 | Contract | Provider adapter behaviour against a controlled HTTP server. | Milliseconds | Implemented |
+| Realtime | WebSocket handshake, snapshot frame, live status frame. | Milliseconds | Implemented |
 | Integration | Repositories, worker pipeline, and migrations with real PostgreSQL and Redis. | Seconds | Next |
 | Smoke | The composed stack accepts a notification and reaches the provider. | Tens of seconds | Next |
 
-The current suite covers unit, provider contract, worker, service, and API handler tests. Repository integration tests and the Compose smoke target are the next milestone.
+The current suite covers unit, provider contract, worker, service, API handler, WebSocket, and tracing endpoint tests. Repository integration tests and the Compose smoke target are the next milestone.
 
 ## 2. Unit tests
 
@@ -25,7 +26,8 @@ Packages and cases:
   - Priority defaults and invalid values.
   - Batch size 0, 1, 1000, 1001.
   - Scheduled time in the past and too far ahead.
-  - Template fields rejected until the bonus feature lands.
+  - Template validation, rendering, missing variables, and channel limits.
+  - Manual retry rules for `failed` and `dead_letter`.
   - Idempotency key replay, in-progress recovery, and conflict decisions.
 - `internal/delivery`:
   - Status code classification: 202, 400, 408, 425, 429, 500, 503.
@@ -38,6 +40,14 @@ Packages and cases:
 - `internal/platform`:
   - Config validation and defaults.
   - Correlation ID generation and propagation.
+  - OTLP endpoint normalization.
+- `internal/realtime`:
+  - Broadcast by notification ID.
+  - Unsubscribe.
+- `internal/api` WebSocket:
+  - Snapshot frame on connect.
+  - Live status frame.
+  - Upgrade through the logging middleware.
 
 Use table-driven tests. Use `t.Parallel()` where the code has no shared state.
 
@@ -128,6 +138,9 @@ go test ./internal/notification/...
 
 # OpenAPI lint
 make openapi-lint
+
+# k6 load test, with the stack running
+BASE_URL=http://localhost:8080 make load-test
 ```
 
 Without Make:
@@ -171,4 +184,4 @@ Cache Go modules and build cache. Fail fast on formatting and lint.
 - Real SMS, email, or push providers.
 - webhook.site availability.
 - Browser UI. The API and Swagger UI are the interface.
-- Long-running soak tests in CI. A local k6 script is a bonus.
+- Long-running soak tests in CI. A local k6 script is provided for load evidence.

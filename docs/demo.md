@@ -131,7 +131,97 @@ Expected: `scheduled` immediately, `accepted` after the scheduled time.
 
 To test cancellation, create a notification scheduled 30 seconds ahead, call `/cancel` immediately, and verify it stays `cancelled` after the scheduled time with no `provider_message_id`.
 
-## 7. Stats and metrics
+## 7. Templates
+
+Create a template:
+
+```bash
+curl -s -X POST "$BASE_URL/api/v1/templates" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "welcome",
+    "channel": "sms",
+    "content": "Hello {{name}}, your code is {{code}}"
+  }'
+```
+
+Send a notification that uses it:
+
+```bash
+curl -s -X POST "$BASE_URL/api/v1/notifications" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "recipient": "+15555550100",
+    "channel": "sms",
+    "template": "welcome",
+    "variables": {"name": "Onat", "code": "ABC"}
+  }'
+```
+
+Expected: `202` and `"content":"Hello Onat, your code is ABC"`. Remove `code` from `variables` and expect `422` with `variables.code` in `details`.
+
+## 8. Dead-letter retry
+
+After the failure demo, keep the dead-letter notification ID and call:
+
+```bash
+export DEAD_LETTER_ID=<id-from-section-5>
+curl -s -X POST "$BASE_URL/api/v1/notifications/$DEAD_LETTER_ID/retry"
+```
+
+Expected: `202` with `"status":"queued"` and `"attempt_count":0`. Once the working provider URL is restored, poll the notification until `accepted` with `attempt_count:1`.
+
+## 9. WebSocket updates
+
+Install [websocat](https://github.com/vi/websocat) or use any WebSocket client:
+
+```bash
+SCHEDULED_AT=$(date -u -d '+8 seconds' +%Y-%m-%dT%H:%M:%SZ)
+curl -s -X POST "$BASE_URL/api/v1/notifications" \
+  -H 'Content-Type: application/json' \
+  -d "{\"recipient\":\"+15555550100\",\"channel\":\"sms\",\"content\":\"WebSocket demo\",\"scheduled_at\":\"$SCHEDULED_AT\"}"
+
+# Copy the id from the response, then:
+export NOTIFICATION_ID=<id>
+websocat "ws://localhost:8080/api/v1/ws?notification_id=$NOTIFICATION_ID"
+```
+
+Expected frames: `snapshot` with `scheduled`, then `status` events for `processing` and `accepted`. If the gateway port is not `8080`, change the URL.
+
+## 10. Distributed tracing
+
+```bash
+# Add OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 to .env
+docker compose --profile tracing up -d jaeger
+docker compose up -d api worker
+```
+
+Create a notification, then open `http://localhost:16686`. Select the `api` or `worker` service and open the trace. Expected spans in one trace: `POST /api/v1/notifications`, `queue.enqueue`, `notification.process`, and `provider.send`.
+
+## 11. Load test
+
+With [k6](https://k6.io) installed and the stack running:
+
+```bash
+BASE_URL=http://localhost:8080 k6 run scripts/load-test.js
+# or
+BASE_URL=http://localhost:8080 make load-test
+```
+
+The script runs 20 virtual users for 30 seconds, creates SMS notifications with unique idempotency keys, and fails if more than 1% of requests error or p95 request latency exceeds 300 ms. The queue and the 100/s channel limiter absorb the burst.
+
+## 12. Prometheus and Grafana
+
+```bash
+docker compose --profile metrics up -d prometheus grafana
+```
+
+- Prometheus: `http://localhost:9090`
+- Grafana: `http://localhost:3000`, `admin` / `admin`
+
+Open the provisioned `Notification System` dashboard. Run the load test or the demo requests and watch queue depth, status transitions, provider latency, and rate-limit wait.
+
+## 13. Stats and metrics
 
 ```bash
 curl -s "$BASE_URL/api/v1/stats"
@@ -141,7 +231,7 @@ curl -s http://localhost:9091/metrics | grep -E 'provider_request_total|notifica
 
 Expected: queue depth, accepted/failed/dead-letter counts, success rate, p95 latency, and worker provider metrics.
 
-## 8. Clean up
+## 14. Clean up
 
 ```bash
 docker compose down -v
