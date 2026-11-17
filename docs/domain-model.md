@@ -98,6 +98,7 @@ stateDiagram-v2
     scheduled --> processing: scheduled task fires
     scheduled --> cancelled: cancel
     queued --> processing: worker claims
+    queued --> cancelled: cancel before claim
     processing --> accepted: provider 202
     processing --> queued: transient error, retries left
     processing --> failed: permanent error
@@ -124,6 +125,8 @@ RETURNING *;
 If zero rows change, the worker stops. Another worker or a cancellation already moved the row.
 
 A `processing` row can be reclaimed after its lease expires. The guarded update adds `OR (status = 'processing' AND updated_at < now() - interval '2 minutes' AND attempt_count < max_attempts)`. If every attempt is already used, the worker moves the row to `dead_letter` instead of reclaiming it. This recovers a worker crash without exceeding `attempt_count <= max_attempts`.
+
+A `queued` row can be cancelled while it waits in Redis. The guarded update and the worker claim race on the same row; whichever wins decides whether the notification is cancelled or delivered.
 
 ## 4. Tables
 
@@ -254,6 +257,10 @@ CREATE INDEX idx_notifications_scheduled
 CREATE INDEX idx_notifications_queued_updated
     ON notifications (updated_at)
     WHERE status = 'queued';
+
+CREATE INDEX idx_notifications_processing_updated
+    ON notifications (updated_at)
+    WHERE status = 'processing';
 
 CREATE INDEX idx_notification_events_notification
     ON notification_events (notification_id, created_at);

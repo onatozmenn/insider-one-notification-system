@@ -38,7 +38,7 @@ The OpenAPI file at `api/openapi.yaml` is the contract. This document explains t
 | `POST` | `/notifications/batch` | Create up to 1000 notifications. | `202` |
 | `GET` | `/notifications/{id}` | Get one notification. | `200` |
 | `GET` | `/notifications` | List with filters and pagination. | `200` |
-| `POST` | `/notifications/{id}/cancel` | Cancel a pending or scheduled notification. | `200` |
+| `POST` | `/notifications/{id}/cancel` | Cancel a pending, scheduled, or queued notification. | `200` |
 | `POST` | `/notifications/{id}/retry` | Retry a failed or dead-letter notification. | `202` |
 | `POST` | `/templates` | Create a message template. | `201` |
 | `GET` | `/templates` | List templates. | `200` |
@@ -237,15 +237,15 @@ Ordering is `created_at DESC, id DESC`.
 POST /api/v1/notifications/0193b2f4-7c1a-7d3e-9a10-5f8c2d6e4b71/cancel
 ```
 
-Allowed only when the status is `pending` or `scheduled`. Returns `200` with the updated notification.
+Allowed when the status is `pending`, `scheduled`, or `queued`. Returns `200` with the updated notification. A queued notification that a worker has already claimed moves to `processing`, and the cancellation then returns `409`; the guarded update decides the race.
 
-`409 Conflict` when the status is `queued`, `processing`, `accepted`, `failed`, `cancelled`, `dead_letter`, or `delivered`.
+`409 Conflict` when the status is `processing`, `accepted`, `failed`, `cancelled`, `dead_letter`, or `delivered`.
 
 ```json
 {
   "error": {
     "code": "not_cancellable",
-    "message": "Only pending or scheduled notifications can be cancelled",
+    "message": "Only pending, scheduled, or queued notifications can be cancelled",
     "details": []
   }
 }
@@ -383,6 +383,7 @@ The numbers come from the database for the last five minutes and from asynq Insp
   - If it is still running, the server returns `409 idempotency_in_progress`. The MVP commits the resource and the idempotency row together, so this state is reserved for future multi-step creates.
 - Same key and a different hash: `422 idempotency_conflict`.
 - Keys expire after 24 hours. An expired key is deleted when read and by an hourly cleanup, so it can be reused.
+- A scheduled request with a valid key can replay after its scheduled time; the original resource is returned without re-validating the past `scheduled_at` window.
 - The notification (or batch) and the completed idempotency row commit in one transaction. The row stores `resource_id`.
 - If the transaction fails, nothing is committed and a retry starts cleanly. A concurrent request with the same key gets a unique violation, reads the completed row, and replays the resource.
 - Without a key, two requests create two distinct notifications with different IDs. The worker guard only prevents repeated work for the same notification ID; it cannot deduplicate separate notifications.

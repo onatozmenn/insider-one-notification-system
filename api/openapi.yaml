@@ -7,7 +7,7 @@ info:
     Event-driven notification API for SMS, email, and push.
 
     Create one notification or a batch, query status, list with filters,
-    cancel pending work, retry failed deliveries, render templates, and inspect
+    cancel pending, scheduled, or queued work, retry failed deliveries, render templates, and inspect
     delivery stats. The API is asynchronous: a create returns `202 Accepted`
     while the worker handles delivery.
 
@@ -167,7 +167,7 @@ paths:
   /api/v1/notifications/{id}/cancel:
     post:
       tags: [Notifications]
-      summary: Cancel a pending or scheduled notification
+      summary: Cancel a pending, scheduled, or queued notification
       operationId: cancelNotification
       parameters:
         - $ref: '#/components/parameters/NotificationID'
