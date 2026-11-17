@@ -134,6 +134,34 @@ func TestReconcilerRequeuesStaleQueuedRow(t *testing.T) {
 	waitForQueueDepth(t, deliveryQueue, 1)
 }
 
+func TestReconcilerRecoversArchivedTask(t *testing.T) {
+	ctx := context.Background()
+	resetDeliveryState(t)
+
+	now := time.Now().UTC()
+	n := deliveryNotification()
+	n.Status = notification.StatusQueued
+	n.CreatedAt = now.Add(-30 * time.Minute)
+	n.UpdatedAt = now.Add(-20 * time.Minute)
+	_, err := deliveryRepo.Create(ctx, n, []byte(`{}`), nil)
+	require.NoError(t, err)
+
+	require.NoError(t, deliveryQueue.Enqueue(ctx, n.ID, n.Priority, n.CorrelationID, nil))
+	require.NoError(t, deliveryQueue.Inspector().ArchiveTask(QueueNormal, n.ID.String()))
+
+	info, err := deliveryQueue.Inspector().GetTaskInfo(QueueNormal, n.ID.String())
+	require.NoError(t, err)
+	require.Equal(t, asynq.TaskStateArchived, info.State)
+
+	NewReconciler(deliveryRepo, deliveryQueue, deliveryLogger).runOnce(ctx)
+
+	waitForQueueDepth(t, deliveryQueue, 1)
+
+	info, err = deliveryQueue.Inspector().GetTaskInfo(QueueNormal, n.ID.String())
+	require.NoError(t, err)
+	assert.NotEqual(t, asynq.TaskStateArchived, info.State)
+}
+
 func waitForQueueDepth(t *testing.T, queue *Queue, want int) {
 	t.Helper()
 
@@ -193,6 +221,8 @@ func resetDeliveryState(t *testing.T) {
 	t.Helper()
 	require.NoError(t, deliveryPostgres.Reset(context.Background()))
 	require.NoError(t, deliveryRedis.Client.FlushDB(context.Background()).Err())
+	require.NoError(t, deliveryRedis.Client.SAdd(context.Background(), "asynq:queues",
+		QueueHigh, QueueNormal, QueueLow).Err())
 }
 
 func deliveryNotification() *notification.Notification {
