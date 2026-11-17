@@ -29,15 +29,22 @@ When the stack is healthy:
 | `http://localhost:9091/metrics` | Worker Prometheus metrics |
 | `http://localhost:8080/api/v1/stats` | Human-readable stats |
 | `http://localhost:8081` | API directly, bypassing the gateway |
+| `ws://localhost:8080/api/v1/ws?notification_id=<id>` | WebSocket status updates |
+| `http://localhost:16686` | Jaeger UI, `tracing` profile |
+| `http://localhost:9090` | Prometheus, `metrics` profile |
+| `http://localhost:3000` | Grafana, `metrics` profile (`admin` / `admin`) |
 
 Optional profiles:
 
 ```bash
 # Queue inspection UI at http://localhost:8083
-docker compose --profile tools up
+docker compose --profile tools up -d
 
 # Jaeger UI at http://localhost:16686
-docker compose --profile tracing up
+docker compose --profile tracing up -d jaeger
+
+# Prometheus and Grafana
+docker compose --profile metrics up -d prometheus grafana
 ```
 
 ## 3. Services
@@ -52,7 +59,9 @@ docker compose --profile tracing up
 | `migrate` | none | Runs once and exits. |
 | `worker` | `9091` (`WORKER_METRICS_PORT`) | Worker metrics only. No inbound API traffic. |
 | `asynqmon` | `8083` | Optional `tools` profile. |
-| `jaeger` | `16686` | Optional `tracing` profile. |
+| `jaeger` | `16686`, OTLP `4318` | Optional `tracing` profile. |
+| `prometheus` | `9090` | Optional `metrics` profile. |
+| `grafana` | `3000` | Optional `metrics` profile. |
 
 ## 4. Configuration
 
@@ -189,7 +198,8 @@ LIMIT 50;
 
 2. Inspect the provider response in the logs by `notification_id`.
 3. Fix the cause: bad recipient, provider outage, invalid payload.
-4. Retry with `POST /api/v1/notifications/{id}/retry` (bonus). If you retry manually, set the row to `pending`, reset `attempt_count` to 0, clear `last_error`, and enqueue a fresh task ID. Do not reuse the archived task ID; the reconciler only scans `pending` rows.
+4. Retry with `POST /api/v1/notifications/{id}/retry`. The endpoint resets the row, clears the error, and enqueues a fresh task ID. The archived asynq task stays archived; delete it with asynqmon if the archive should be cleaned up.
+5. If Redis is unavailable during the retry, the row stays `pending`; the reconciler enqueues it when Redis returns. The API still returns `202`.
 
 ### Provider errors
 

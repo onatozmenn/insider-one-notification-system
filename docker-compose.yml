@@ -23,6 +23,7 @@ x-env: &env
   MAX_ATTEMPTS: ${MAX_ATTEMPTS:-5}
   LOG_LEVEL: ${LOG_LEVEL:-info}
   WS_ENABLED: ${WS_ENABLED:-true}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
 
 services:
   postgres:
@@ -128,6 +129,42 @@ services:
       timeout: 3s
       retries: 10
     restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.76.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:16686:16686"
+      - "127.0.0.1:4318:4318"
+    profiles: ["tracing"]
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    profiles: ["metrics"]
+    depends_on:
+      api:
+        condition: service_healthy
+      worker:
+        condition: service_started
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    profiles: ["metrics"]
+    depends_on:
+      - prometheus
 
 volumes:
   postgres_data:

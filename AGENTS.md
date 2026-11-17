@@ -315,5 +315,5 @@ At-least-once while PostgreSQL has accepted the work and Redis still holds the t
 ## 15. Open decisions
 
 - [x] Repository name: `insider-one-notification-system`.
-- [ ] Optional Prometheus/Grafana profile. Not required by the brief.
-- [ ] Load test with k6. Useful evidence, not required.
+- [x] Optional Prometheus/Grafana profile. Implemented under the `metrics` profile.
+- [x] Load test with k6. Implemented in `scripts/load-test.js`.

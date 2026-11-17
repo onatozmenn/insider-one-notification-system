@@ -2,13 +2,18 @@ openapi: 3.1.0
 
 info:
   title: Insider One Notification System API
-  version: 1.0.0
+  version: 1.1.0
   description: |
     Event-driven notification API for SMS, email, and push.
 
     Create one notification or a batch, query status, list with filters,
-    cancel pending work, and inspect delivery stats. The API is asynchronous:
-    a create returns `202 Accepted` while the worker handles delivery.
+    cancel pending work, retry failed deliveries, render templates, and inspect
+    delivery stats. The API is asynchronous: a create returns `202 Accepted`
+    while the worker handles delivery.
+
+    Live status updates are available over WebSocket at
+    `GET /api/v1/ws?notification_id=<uuid>`. The connection opens with a
+    snapshot frame and then streams status events.
 
 servers:
   - url: http://localhost:8080
@@ -21,6 +26,8 @@ tags:
     description: Create, query, and cancel notifications.
   - name: Batches
     description: Create and inspect batches.
+  - name: Templates
+    description: Reusable message templates with variable substitution.
   - name: Observability
     description: Health, readiness, metrics, and delivery stats.
 
@@ -184,6 +191,38 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/v1/notifications/{id}/retry:
+    post:
+      tags: [Notifications]
+      summary: Retry a failed or dead-letter notification
+      operationId: retryNotification
+      parameters:
+        - $ref: '#/components/parameters/NotificationID'
+      responses:
+        '202':
+          description: The notification was reset and queued.
+          headers:
+            Location:
+              description: URL of the retried notification.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The notification is not failed or dead-letter.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/v1/batches/{id}:
     get:
       tags: [Batches]
@@ -198,6 +237,74 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Batch'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/templates:
+    post:
+      tags: [Templates]
+      summary: Create a message template
+      operationId: createTemplate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TemplateCreate'
+      responses:
+        '201':
+          description: Template created.
+          headers:
+            Location:
+              description: URL of the created template.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+        '409':
+          description: A template with this name already exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    get:
+      tags: [Templates]
+      summary: List templates
+      operationId: listTemplates
+      responses:
+        '200':
+          description: All templates ordered by name.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateList'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/templates/{id}:
+    get:
+      tags: [Templates]
+      summary: Get one template
+      operationId: getTemplate
+      parameters:
+        - $ref: '#/components/parameters/TemplateID'
+      responses:
+        '200':
+          description: The template.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
         '404':
           $ref: '#/components/responses/NotFound'
         '422':
@@ -286,6 +393,14 @@ components:
         format: uuid
 
     BatchID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    TemplateID:
       name: id
       in: path
       required: true
@@ -388,8 +503,11 @@ components:
 
     NotificationCreate:
       type: object
-      required: [recipient, channel, content]
+      required: [recipient, channel]
       additionalProperties: false
+      anyOf:
+        - required: [content]
+        - required: [template]
       properties:
         recipient:
           type: string
@@ -401,24 +519,77 @@ components:
         subject:
           type: string
           maxLength: 200
-          description: Required for email; optional title for push; not allowed for SMS.
+          description: Required for email; optional title for push; not allowed for SMS. Overridden by a template subject.
         content:
           type: string
           minLength: 1
           maxLength: 50000
+          description: Message body. Overridden when a template is used.
         priority:
           $ref: '#/components/schemas/Priority'
         scheduled_at:
           type: string
           format: date-time
-          description: Bonus feature. Future time, at most 30 days ahead.
+          description: Future time, at most 30 days ahead.
         template:
           type: string
-          description: Bonus feature. Rejected until templates are enabled.
+          description: Template name. The rendered content overrides content and subject.
         variables:
           type: object
           additionalProperties:
             type: string
+          description: Values for {{placeholder}} variables. Requires template.
+
+    TemplateCreate:
+      type: object
+      required: [name, channel, content]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        channel:
+          $ref: '#/components/schemas/Channel'
+        subject:
+          type: string
+          maxLength: 200
+          description: Required for email; optional title for push; not allowed for SMS.
+        content:
+          type: string
+          minLength: 1
+          description: Template body. Supports {{variable}} placeholders.
+
+    Template:
+      type: object
+      required: [id, name, channel, content, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        channel:
+          $ref: '#/components/schemas/Channel'
+        subject:
+          type: [string, "null"]
+        content:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TemplateList:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Template'
 
     Notification:
       type: object

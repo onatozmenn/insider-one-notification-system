@@ -68,7 +68,7 @@ erDiagram
     }
 ```
 
-`TEMPLATES` is a bonus feature. It is omitted from the MVP migrations.
+`TEMPLATES` is created by migration `000002_templates`. A notification stores the rendered body; the template reference is not persisted.
 
 ## 2. Notification statuses
 
@@ -102,6 +102,8 @@ stateDiagram-v2
     processing --> queued: transient error, retries left
     processing --> failed: permanent error
     processing --> dead_letter: retries exhausted
+    failed --> pending: manual retry
+    dead_letter --> pending: manual retry
     accepted --> delivered: receipt (bonus)
     accepted --> [*]
     failed --> [*]
@@ -198,7 +200,7 @@ Primary key: `(scope, key)`.
 
 If the transaction fails, nothing is committed and a retry starts cleanly. A concurrent request with the same key gets a unique violation, reads the completed row, and replays the resource. The `in_progress` state is reserved for a future multi-step create. Enqueue happens after commit; if it fails, the notification stays `pending` and the reconciler recovers it.
 
-### `templates` (bonus)
+### `templates`
 
 | Column | Type | Notes |
 | --- | --- | --- |

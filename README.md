@@ -4,16 +4,18 @@ A production-shaped notification service that accepts SMS, email, and push reque
 
 Built for the **Insider One Software Engineer Assessment 2026** with **Go 1.26**, **PostgreSQL 16**, and **Redis 7**.
 
-> **Status:** core MVP, OpenAPI, Prometheus metrics, scheduled notifications, failure handling, and CI/CD are implemented. Templates, WebSocket updates, distributed tracing, and the load test remain on the bonus backlog.
+> **Status:** all MVP requirements and bonus features are implemented: scheduled notifications, templates, WebSocket status updates, distributed tracing, dead-letter retry, a k6 load test, and a Prometheus/Grafana profile.
 
 ## What it does
 
 - Create one notification or a batch of up to 1000.
+- Render reusable templates with `{{variable}}` substitution, or send inline content.
 - Query by notification ID or batch ID. List with status, channel, batch, and date filters plus pagination.
-- Cancel pending or scheduled notifications.
+- Cancel pending or scheduled notifications. Retry failed or dead-letter notifications.
 - Process asynchronously with weighted priority queues, a shared 100 messages/second limit per channel, retries, and dead-letter handling.
 - Reduce duplicate sends with API idempotency keys, unique task IDs, and guarded state transitions. The delivery contract remains at-least-once.
 - Deliver through webhook.site, with `202 accepted` treated as provider acceptance.
+- Stream status changes over WebSocket and propagate a W3C trace through API, queue, worker, and provider.
 - Expose Prometheus metrics, JSON logs with correlation IDs, health checks, and a human-readable stats endpoint.
 
 ## Architecture
@@ -51,6 +53,9 @@ See [docs/architecture.md](docs/architecture.md) for the full design and [docs/d
 | Idempotency | API `Idempotency-Key` plus worker task IDs and guarded transitions. |
 | Recovery | A reconciler re-enqueues `pending` rows after a crash or a short Redis outage. |
 | Scheduling | `scheduled_at` uses asynq `ProcessAt`; cancellation is checked when the task fires. |
+| Templates | `templates` table, `{{variable}}` rendering, missing variables rejected before enqueue. |
+| Realtime | Redis pub/sub to a WebSocket hub; clients get a snapshot, then live status frames. |
+| Tracing | OpenTelemetry OTLP spans; `traceparent` travels in the asynq payload and the provider request. |
 | Observability | Prometheus metrics, JSON logs, `X-Request-ID`, `/healthz`, `/readyz`, `/api/v1/stats`. |
 | API contract | OpenAPI 3.1, Swagger UI, and Redocly lint in CI. |
 | Delivery simulation | webhook.site; tests use a local `httptest` provider. |
@@ -63,6 +68,18 @@ cd insider-one-notification-system
 cp .env.example .env
 docker compose up --build
 ```
+
+Optional profiles:
+
+```bash
+# Jaeger for traces (set OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 in .env first)
+docker compose --profile tracing up -d jaeger
+
+# Prometheus and Grafana
+docker compose --profile metrics up -d prometheus grafana
+```
+
+Restart the API and worker after changing `OTEL_EXPORTER_OTLP_ENDPOINT` so the exporter picks it up.
 
 Before expecting delivery, replace `PROVIDER_BASE_URL` in `.env` with your own URL from [webhook.site](https://webhook.site). Configure it to return:
 
@@ -89,6 +106,10 @@ The URL is public and anonymous webhook.site URLs expire after seven days. If po
 | `http://localhost:9091/metrics` | Worker Prometheus metrics |
 | `http://localhost:8080/healthz` | Liveness |
 | `http://localhost:8080/readyz` | PostgreSQL and Redis readiness |
+| `ws://localhost:8080/api/v1/ws?notification_id=<id>` | Live status updates |
+| `http://localhost:16686` | Jaeger UI (`tracing` profile) |
+| `http://localhost:9090` | Prometheus (`metrics` profile) |
+| `http://localhost:3000` | Grafana, `admin` / `admin` (`metrics` profile) |
 
 ## API examples
 
@@ -136,6 +157,45 @@ Cancel a pending or scheduled notification:
 curl -s -X POST "http://localhost:8080/api/v1/notifications/${NOTIFICATION_ID}/cancel"
 ```
 
+Create a template and send with it:
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/templates \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "welcome",
+    "channel": "sms",
+    "content": "Hello {{name}}, your code is {{code}}"
+  }'
+
+curl -s -X POST http://localhost:8080/api/v1/notifications \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "recipient": "+15555550100",
+    "channel": "sms",
+    "template": "welcome",
+    "variables": {"name": "Onat", "code": "ABC"}
+  }'
+```
+
+Retry a failed or dead-letter notification:
+
+```bash
+curl -s -X POST "http://localhost:8080/api/v1/notifications/${NOTIFICATION_ID}/retry"
+```
+
+Watch status changes over WebSocket (the first frame is a snapshot):
+
+```bash
+websocat "ws://localhost:8080/api/v1/ws?notification_id=${NOTIFICATION_ID}"
+```
+
+```json
+{"type":"snapshot","notification":{"id":"...","status":"queued"}}
+{"type":"status","event":{"notification_id":"...","status":"processing","attempt_count":1}}
+{"type":"status","event":{"notification_id":"...","status":"accepted","attempt_count":1}}
+```
+
 Schedule a notification:
 
 ```bash
@@ -171,7 +231,8 @@ curl -s http://localhost:8080/api/v1/stats
 - **Rate limit:** 100 provider calls per second per channel, shared through Redis. The token wait happens before the claim.
 - **Retries:** up to 5 attempts by default. Exponential backoff with full jitter, capped at 30 seconds. `Retry-After` is honoured.
 - **Error classes:** `408`, `425`, `429`, `5xx`, timeouts, and network errors are transient. Other `4xx` are permanent.
-- **Dead letter:** exhausted transient retries move to `dead_letter` with the last error and attempt count.
+- **Dead letter:** exhausted transient retries move to `dead_letter` with the last error and attempt count. `POST /notifications/{id}/retry` resets the row, uses a fresh task ID, and re-enqueues it.
+- **Templates:** the API renders the template before validation. A missing variable rejects the request with `variables.<name>` details. The stored notification keeps the rendered content.
 - **Idempotency:** the API stores a key and request hash and replays the original resource. The worker uses the notification ID as the task ID and guards every transition.
 - **Cancellation:** only `pending` and `scheduled`; the worker re-checks before the provider call.
 - **Recovery:** a reconciler scans `pending` rows every 30 seconds. A stale `processing` row can be reclaimed after the lease.
@@ -182,11 +243,12 @@ curl -s http://localhost:8080/api/v1/stats
 make test          # unit and contract tests with the race detector
 make test-unit
 make openapi-lint  # Redocly lint for the OpenAPI spec
+make load-test     # k6 create throughput, requires k6 and a running stack
 ```
 
-The current suite covers validation, idempotency and service rules, API handlers, provider responses (202, 400, 429, 500, timeout), worker transitions, retry backoff, and priority mapping. Provider tests use `httptest` and do not depend on webhook.site.
+The current suite covers validation, idempotency and service rules, templates and rendering, API handlers, WebSocket frames, provider responses (202, 400, 429, 500, timeout), worker transitions, retry backoff, priority mapping, and tracing endpoint handling. Provider tests use `httptest` and do not depend on webhook.site.
 
-Repository integration tests with testcontainers and a Compose smoke target are the next additions. The manual end-to-end checks below were run against the Compose stack.
+Repository integration tests with testcontainers and a Compose smoke target are the next additions. The manual end-to-end checks below were run against the Compose stack and the bonus features were exercised the same way.
 
 ## Verified end-to-end
 
@@ -200,6 +262,14 @@ On 2026-11-17, against the local Compose stack and webhook.site:
 - Reconciler: recovered six pre-existing `pending` rows and queued them.
 - Metrics: API and worker `/metrics` exposed HTTP, queue-depth, provider, status, rate-limit, and processing metrics.
 - Stats: `accepted: 3`, `success_rate: 1`, `p95_latency_ms: 1198`.
+- Template: `welcome` rendered `Hello Onat, your code is ABC` and the notification reached `accepted`.
+- Dead-letter retry: `dead_letter` → `POST /retry` → `queued` → `accepted`, attempts reset to 1.
+- WebSocket: snapshot `scheduled`, then `processing`, then `accepted` frames.
+- Tracing: one Jaeger trace contained `POST /api/v1/notifications`, `queue.enqueue`, `notification.process`, and `provider.send`.
+- k6 smoke (5 VUs, 5 seconds): 2027 creates, 0% failed, p95 15.1 ms.
+- k6 burst (20 VUs, 5 seconds): 4468 creates, 0% failed, p95 27.9 ms.
+- Under that burst, Prometheus showed 15.5 SMS provider calls/s with a 4468-deep queue: below the 100/s per-channel cap, with provider latency as the bottleneck.
+- Prometheus targets for API and worker were `up`; Grafana loaded the provisioned dashboard and datasource.
 - CI: test, lint, Docker build, and OpenAPI lint passed.
 
 ## Documentation
@@ -224,5 +294,5 @@ On 2026-11-17, against the local Compose stack and webhook.site:
 - webhook.site is a simulation. `accepted` means the provider accepted the message, not that a user received it.
 - A Redis flush loses queued tasks. The reconciler recovers `pending` rows, not in-flight tasks.
 - Offset pagination can shift when new rows arrive during a scan.
-- Templates, WebSocket updates, and distributed tracing are on the bonus backlog.
+- WebSocket updates are best-effort. A client that misses a frame can re-read the notification; there is no replay buffer.
 - Repository integration tests and the Compose smoke target are not implemented yet.

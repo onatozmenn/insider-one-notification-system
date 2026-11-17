@@ -13,7 +13,9 @@ import (
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/accesslog"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/metrics"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/requestid"
+	"github.com/onatozmenn/insider-one-notification-system/internal/platform/tracing"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/version"
+	"github.com/onatozmenn/insider-one-notification-system/internal/realtime"
 )
 
 // ReadinessChecks are the dependencies the API must reach before it can serve
@@ -30,6 +32,7 @@ type Dependencies struct {
 	Notifications NotificationService
 	Metrics       *metrics.Metrics
 	QueueDepth    QueueDepthProvider
+	Realtime      *realtime.Hub
 }
 
 // NewRouter builds the HTTP router. Feature routes are added as their
@@ -37,9 +40,10 @@ type Dependencies struct {
 func NewRouter(deps Dependencies) http.Handler {
 	r := chi.NewRouter()
 	r.Use(requestid.Middleware)
+	r.Use(tracing.Middleware)
 	r.Use(accesslog.Middleware(deps.Logger, deps.Metrics))
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(30 * time.Second))
+	r.Use(requestTimeout(30 * time.Second))
 
 	r.Get("/", info)
 	r.Get("/healthz", healthz)
@@ -51,9 +55,27 @@ func NewRouter(deps Dependencies) http.Handler {
 
 	if deps.Notifications != nil {
 		registerNotificationRoutes(r, deps.Notifications, deps.QueueDepth, deps.Metrics, deps.Logger)
+		registerWebSocketRoute(r, deps.Notifications, deps.Realtime, deps.Logger)
 	}
 
 	return r
+}
+
+// requestTimeout applies the HTTP request deadline to normal routes but leaves
+// WebSocket connections open; their lifetime is controlled by the upgrade.
+func requestTimeout(d time.Duration) func(http.Handler) http.Handler {
+	timeout := middleware.Timeout(d)
+
+	return func(next http.Handler) http.Handler {
+		timed := timeout(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/ws" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			timed.ServeHTTP(w, r)
+		})
+	}
 }
 
 func info(w http.ResponseWriter, _ *http.Request) {

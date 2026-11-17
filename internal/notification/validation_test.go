@@ -174,14 +174,14 @@ func TestValidateCreateRejectsInvalidInput(t *testing.T) {
 			field: "scheduled_at",
 		},
 		{
-			name: "template not enabled",
+			name: "variables without template",
 			input: CreateInput{
 				Recipient: "+15555550100",
 				Channel:   ChannelSMS,
 				Content:   "hello",
-				Template:  "welcome",
+				Variables: map[string]string{"name": "Onat"},
 			},
-			field: "template",
+			field: "variables",
 		},
 	}
 

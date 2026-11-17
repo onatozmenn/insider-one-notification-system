@@ -20,7 +20,9 @@ import (
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/metrics"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/postgres"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/redis"
+	"github.com/onatozmenn/insider-one-notification-system/internal/platform/tracing"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/version"
+	"github.com/onatozmenn/insider-one-notification-system/internal/realtime"
 )
 
 func main() {
@@ -40,6 +42,17 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	shutdownTracing, err := tracing.Setup(ctx, cfg.OTelEndpoint, "api", version.Version)
+	if err != nil {
+		log.Warn("tracing setup failed", "error", err)
+	} else {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = shutdownTracing(shutdownCtx)
+		}()
+	}
 
 	db, err := postgres.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -73,6 +86,12 @@ func run() error {
 
 	go delivery.PollQueueDepth(ctx, queue, appMetrics, 5*time.Second)
 
+	var hub *realtime.Hub
+	if cfg.WebSocketEnabled {
+		hub = realtime.NewHub()
+		go hub.Run(ctx, rdb, log)
+	}
+
 	router := api.NewRouter(api.Dependencies{
 		Logger: log,
 		Readiness: api.ReadinessChecks{
@@ -84,6 +103,7 @@ func run() error {
 		Notifications: notifications,
 		Metrics:       appMetrics,
 		QueueDepth:    queue,
+		Realtime:      hub,
 	})
 
 	server := &http.Server{

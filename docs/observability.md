@@ -147,30 +147,55 @@ A background goroutine in the API polls asynq Inspector every 5 seconds:
 
 The values feed `queue_depth` and `/api/v1/stats`. The poller uses a short timeout and logs failures without crashing the process.
 
-## 7. Tracing (bonus)
+## 7. Tracing
 
-- OpenTelemetry with OTLP HTTP export.
+- OpenTelemetry with OTLP HTTP export. `OTEL_EXPORTER_OTLP_ENDPOINT` enables it; an empty value is a no-op.
 - Spans:
-  - HTTP request (API).
-  - Enqueue (API).
-  - Dequeue and process (worker).
-  - Rate limiter wait.
-  - Provider call.
-  - Database transaction.
-- W3C `traceparent` is propagated through the task payload and the provider request.
-- Jaeger all-in-one runs under the `tracing` compose profile.
-- Tracing is optional. The system works without an exporter.
+  - HTTP request (API server span, named by route).
+  - `queue.enqueue` (API producer span).
+  - `notification.process` (worker consumer span).
+  - `rate_limit.wait` (worker internal span with the wait duration).
+  - `provider.send` (worker client span).
+- W3C `traceparent` is injected into the asynq task payload and the provider request headers, so the API request, queue hop, worker, and provider call share one trace.
+- Jaeger all-in-one runs under the `tracing` compose profile. The OTLP HTTP endpoint is `http://jaeger:4318`; the exporter appends `/v1/traces`.
+- Tracing is optional. The system works without an exporter, and a tracing setup failure is logged without stopping the process.
+- Run it with:
 
-## 8. WebSocket (bonus)
+```bash
+# .env: OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+docker compose --profile tracing up -d jaeger
+docker compose up -d api worker
+```
 
-- Endpoint: `GET /api/v1/ws?notification_id=<id>`.
+Open `http://localhost:16686`, choose the `api` or `worker` service, and inspect a trace.
+
+## 8. WebSocket
+
+- Endpoint: `GET /api/v1/ws?notification_id=<id>`. The gateway upgrades the connection.
 - The API subscribes to Redis pub/sub channel `notification.events`.
-- The worker publishes `{notification_id, status, updated_at, attempt_count}` after each transition.
+- The worker publishes `{notification_id, channel, status, attempt_count, updated_at}` after each delivery transition: claim, acceptance, retry, permanent failure, and dead letter.
 - The hub filters events by the requested notification ID and sends JSON frames.
 - On connect, the client receives a snapshot of the current notification, then updates.
-- If Redis pub/sub is unavailable, the WebSocket falls back to polling the database every 2 seconds. This keeps the feature useful without pretending pub/sub is reliable.
+- A 2-second poll of the notification row is a fallback when pub/sub is unavailable or a transition is missed. The poll stops when the connection closes. This costs one indexed read per connection every two seconds.
+- Frames are best-effort. There is no replay buffer; a reconnecting client should re-read the notification. `WS_ENABLED=false` disables the route and hub.
 
-## 9. Alerts (production view)
+## 9. Grafana
+
+`docker compose --profile metrics up -d prometheus grafana` starts:
+
+- Prometheus at `http://localhost:9090`, scraping `api:8080` and `worker:9090` every 5 seconds.
+- Grafana at `http://localhost:3000` (`admin` / `admin`) with a provisioned `Notification System` dashboard:
+  - queue depth by queue,
+  - provider requests by result and request rate by channel,
+  - status transitions by status,
+  - success rate over the selected window,
+  - provider p95 latency by channel,
+  - rate-limit wait p95 by channel,
+  - processing p95 by channel and status.
+
+The dashboard file is `deploy/grafana/dashboards/notification-system.json`.
+
+## 10. Alerts (production view)
 
 These are not implemented in the assessment, but the metrics support them:
 
@@ -182,7 +207,7 @@ These are not implemented in the assessment, but the metrics support them:
 | Latency | p95 `provider_request_duration_seconds` above 2 seconds. |
 | Readiness | `/readyz` fails for 1 minute. |
 
-## 10. Privacy
+## 11. Privacy
 
 - No real personal data in demos or tests.
 - Recipients are masked in logs.

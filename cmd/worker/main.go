@@ -20,8 +20,10 @@ import (
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/metrics"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/postgres"
 	redisplatform "github.com/onatozmenn/insider-one-notification-system/internal/platform/redis"
+	"github.com/onatozmenn/insider-one-notification-system/internal/platform/tracing"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/version"
 	"github.com/onatozmenn/insider-one-notification-system/internal/provider"
+	"github.com/onatozmenn/insider-one-notification-system/internal/realtime"
 )
 
 func main() {
@@ -41,6 +43,17 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	shutdownTracing, err := tracing.Setup(ctx, cfg.OTelEndpoint, "worker", version.Version)
+	if err != nil {
+		log.Warn("tracing setup failed", "error", err)
+	} else {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = shutdownTracing(shutdownCtx)
+		}()
+	}
 
 	db, err := postgres.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -86,12 +99,17 @@ func run() error {
 	limiter := redis_rate.NewLimiter(redisClient)
 	providerClient := provider.NewClient(cfg.ProviderBaseURL, cfg.ProviderTimeout)
 
+	publisher := func(ctx context.Context, event realtime.StatusEvent) error {
+		return realtime.Publish(ctx, redisClient, event)
+	}
+
 	worker := delivery.NewWorker(delivery.WorkerOptions{
 		Redis:         redisOptions,
 		Repository:    repository,
 		Provider:      providerClient,
 		Limiter:       limiter,
 		Metrics:       appMetrics,
+		Publisher:     publisher,
 		Logger:        log,
 		Concurrency:   cfg.WorkerConcurrency,
 		RatePerSecond: cfg.RateLimitPerSecond,

@@ -26,8 +26,12 @@ type NotificationService interface {
 	Get(ctx context.Context, id uuid.UUID) (*notification.Notification, error)
 	List(ctx context.Context, filter notification.ListFilter) ([]notification.Notification, int, error)
 	Cancel(ctx context.Context, id uuid.UUID) (*notification.Notification, error)
+	Retry(ctx context.Context, id uuid.UUID) (*notification.Notification, error)
 	GetBatch(ctx context.Context, id uuid.UUID) (*notification.Batch, error)
 	Stats(ctx context.Context, since time.Time) (notification.Stats, error)
+	CreateTemplate(ctx context.Context, input notification.TemplateInput) (*notification.Template, error)
+	GetTemplate(ctx context.Context, id uuid.UUID) (*notification.Template, error)
+	ListTemplates(ctx context.Context) ([]notification.Template, error)
 }
 
 // QueueDepthProvider exposes current queue depth for the stats endpoint.
@@ -62,8 +66,12 @@ func registerNotificationRoutes(
 		r.Get("/notifications", h.list)
 		r.Get("/notifications/{id}", h.get)
 		r.Post("/notifications/{id}/cancel", h.cancel)
+		r.Post("/notifications/{id}/retry", h.retry)
 		r.Get("/batches/{id}", h.getBatch)
 		r.Get("/stats", h.stats)
+		r.Post("/templates", h.createTemplate)
+		r.Get("/templates", h.listTemplates)
+		r.Get("/templates/{id}", h.getTemplate)
 	})
 }
 
@@ -193,7 +201,26 @@ func (h *notificationHandler) cancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.metrics.IncStatus(string(n.Channel), string(n.Status))
 	writeJSON(w, http.StatusOK, n)
+}
+
+func (h *notificationHandler) retry(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	n, err := h.service.Retry(r.Context(), id)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	h.metrics.IncStatus(string(n.Channel), string(n.Status))
+	w.Header().Set("Location", "/api/v1/notifications/"+n.ID.String())
+	writeJSON(w, http.StatusAccepted, n)
 }
 
 func (h *notificationHandler) stats(w http.ResponseWriter, r *http.Request) {
@@ -209,6 +236,49 @@ func (h *notificationHandler) stats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, stats)
+}
+
+func (h *notificationHandler) createTemplate(w http.ResponseWriter, r *http.Request) {
+	var input notification.TemplateInput
+	if err := decodeJSON(w, r, &input); err != nil {
+		writeAPIError(w, http.StatusUnprocessableEntity, "validation_error", "Invalid JSON body", nil)
+		return
+	}
+
+	template, err := h.service.CreateTemplate(r.Context(), input)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	w.Header().Set("Location", "/api/v1/templates/"+template.ID.String())
+	writeJSON(w, http.StatusCreated, template)
+}
+
+func (h *notificationHandler) listTemplates(w http.ResponseWriter, r *http.Request) {
+	templates, err := h.service.ListTemplates(r.Context())
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"data": templates})
+}
+
+func (h *notificationHandler) getTemplate(w http.ResponseWriter, r *http.Request) {
+	id, err := pathUUID(r, "id")
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	template, err := h.service.GetTemplate(r.Context(), id)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, template)
 }
 
 func (h *notificationHandler) getBatch(w http.ResponseWriter, r *http.Request) {
@@ -234,10 +304,14 @@ func (h *notificationHandler) writeError(w http.ResponseWriter, r *http.Request,
 	switch {
 	case errors.As(err, &validationErr):
 		writeAPIError(w, http.StatusUnprocessableEntity, "validation_error", "Request validation failed", validationErr.Details)
-	case errors.Is(err, notification.ErrNotFound), errors.Is(err, notification.ErrBatchNotFound):
+	case errors.Is(err, notification.ErrNotFound), errors.Is(err, notification.ErrBatchNotFound), errors.Is(err, notification.ErrTemplateNotFound):
 		writeAPIError(w, http.StatusNotFound, "not_found", "Resource not found", nil)
 	case errors.Is(err, notification.ErrNotCancellable):
 		writeAPIError(w, http.StatusConflict, "not_cancellable", "Only pending or scheduled notifications can be cancelled", nil)
+	case errors.Is(err, notification.ErrNotRetryable):
+		writeAPIError(w, http.StatusConflict, "not_retryable", "Only failed or dead-letter notifications can be retried", nil)
+	case errors.Is(err, notification.ErrTemplateExists):
+		writeAPIError(w, http.StatusConflict, "template_exists", "A template with this name already exists", nil)
 	case errors.Is(err, notification.ErrIdempotencyConflict):
 		writeAPIError(w, http.StatusUnprocessableEntity, "idempotency_conflict", "Idempotency key reused with a different request body", nil)
 	case errors.Is(err, notification.ErrIdempotencyInProgress):

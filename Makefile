@@ -1,4 +1,4 @@
-.PHONY: up down logs build test test-unit test-integration lint fmt migrate-up migrate-down migrate-version openapi-lint smoke
+.PHONY: up down logs build test test-unit test-integration lint fmt migrate-up migrate-down migrate-version openapi-lint smoke load-test
 
 up:
 	docker compose up --build
@@ -41,3 +41,6 @@ openapi-lint:
 
 smoke:
 	@echo "Smoke test is planned; use docs/demo.md for a manual walkthrough."
+
+load-test:
+	k6 run scripts/load-test.js

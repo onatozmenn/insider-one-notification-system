@@ -24,12 +24,18 @@ type Store interface {
 	GetBatch(ctx context.Context, id uuid.UUID) (*Batch, error)
 	GetIdempotency(ctx context.Context, scope, key string) (*IdempotencyRecord, error)
 	MarkQueued(ctx context.Context, id uuid.UUID) (*Notification, error)
+	Retry(ctx context.Context, id uuid.UUID) (*Notification, error)
 	Stats(ctx context.Context, since time.Time) (Stats, error)
+	CreateTemplate(ctx context.Context, template *Template) (*Template, error)
+	GetTemplate(ctx context.Context, id uuid.UUID) (*Template, error)
+	GetTemplateByName(ctx context.Context, name string) (*Template, error)
+	ListTemplates(ctx context.Context) ([]Template, error)
 }
 
 // Enqueuer submits a persisted notification to the delivery queue.
 type Enqueuer interface {
 	Enqueue(ctx context.Context, id uuid.UUID, priority Priority, correlationID string, scheduledAt *time.Time) error
+	EnqueueRetry(ctx context.Context, id uuid.UUID, priority Priority, correlationID string) error
 }
 
 var _ Store = (*Repository)(nil)
@@ -73,6 +79,40 @@ func (s *Service) WithLogger(logger *slog.Logger) *Service {
 	return s
 }
 
+// resolveTemplate renders a template reference into subject and content.
+func (s *Service) resolveTemplate(ctx context.Context, input CreateInput) (CreateInput, error) {
+	if input.Template == "" {
+		return input, nil
+	}
+
+	template, err := s.store.GetTemplateByName(ctx, input.Template)
+	if errors.Is(err, ErrTemplateNotFound) {
+		return CreateInput{}, ErrTemplateNotFound
+	}
+	if err != nil {
+		return CreateInput{}, err
+	}
+
+	channel := Channel(strings.ToLower(strings.TrimSpace(string(input.Channel))))
+	if channel != template.Channel {
+		return CreateInput{}, &ValidationError{Details: []FieldError{{
+			Field:  "channel",
+			Reason: "must match the template channel",
+		}}}
+	}
+
+	rendered, err := RenderTemplate(*template, input.Variables)
+	if err != nil {
+		return CreateInput{}, err
+	}
+
+	input.Subject = rendered.Subject
+	input.Content = rendered.Content
+	input.Template = ""
+	input.Variables = nil
+	return input, nil
+}
+
 // Create validates and persists one notification.
 // The boolean result reports an idempotent replay.
 func (s *Service) Create(
@@ -82,6 +122,11 @@ func (s *Service) Create(
 	correlationID string,
 ) (*Notification, bool, error) {
 	now := s.now().UTC()
+
+	input, err := s.resolveTemplate(ctx, input)
+	if err != nil {
+		return nil, false, err
+	}
 
 	validated, err := ValidateCreate(input, now)
 	if err != nil {
@@ -164,7 +209,43 @@ func (s *Service) CreateBatch(
 ) (*Batch, bool, error) {
 	now := s.now().UTC()
 
-	validated, err := ValidateBatch(input, now)
+	if err := validateBatchSize(len(input.Notifications)); err != nil {
+		return nil, false, err
+	}
+
+	// Render every template before validation so a template-only item passes
+	// channel validation and the batch is still all-or-nothing.
+	resolved := make([]CreateInput, len(input.Notifications))
+	var errs []FieldError
+	for i, item := range input.Notifications {
+		value, err := s.resolveTemplate(ctx, item)
+		if err != nil {
+			var validationErr *ValidationError
+			switch {
+			case errors.Is(err, ErrTemplateNotFound):
+				errs = append(errs, FieldError{
+					Field:  fmt.Sprintf("notifications[%d].template", i),
+					Reason: "does not exist",
+				})
+			case errors.As(err, &validationErr):
+				for _, detail := range validationErr.Details {
+					errs = append(errs, FieldError{
+						Field:  fmt.Sprintf("notifications[%d].%s", i, detail.Field),
+						Reason: detail.Reason,
+					})
+				}
+			default:
+				return nil, false, err
+			}
+			continue
+		}
+		resolved[i] = value
+	}
+	if len(errs) > 0 {
+		return nil, false, &ValidationError{Details: errs}
+	}
+
+	validated, err := ValidateBatch(BatchInput{Notifications: resolved}, now)
 	if err != nil {
 		return nil, false, err
 	}
@@ -270,6 +351,35 @@ func (s *Service) Cancel(ctx context.Context, id uuid.UUID) (*Notification, erro
 	return s.store.Cancel(ctx, id)
 }
 
+// Retry resets a failed or dead-letter notification and enqueues a fresh task.
+func (s *Service) Retry(ctx context.Context, id uuid.UUID) (*Notification, error) {
+	n, err := s.store.Retry(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if s.enqueuer == nil {
+		return n, nil
+	}
+
+	if err := s.enqueuer.EnqueueRetry(ctx, n.ID, n.Priority, n.CorrelationID); err != nil {
+		s.logger.Warn("retry enqueue failed; reconciler will retry",
+			"notification_id", n.ID,
+			"error", err,
+		)
+		return n, nil
+	}
+
+	queued, err := s.store.MarkQueued(ctx, n.ID)
+	if err != nil {
+		s.logger.Warn("failed to mark retried notification queued",
+			"notification_id", n.ID,
+			"error", err,
+		)
+		return n, nil
+	}
+	return queued, nil
+}
+
 // GetBatch returns a batch summary.
 func (s *Service) GetBatch(ctx context.Context, id uuid.UUID) (*Batch, error) {
 	return s.store.GetBatch(ctx, id)
@@ -278,6 +388,42 @@ func (s *Service) GetBatch(ctx context.Context, id uuid.UUID) (*Batch, error) {
 // Stats returns delivery counts and latency since the cutoff.
 func (s *Service) Stats(ctx context.Context, since time.Time) (Stats, error) {
 	return s.store.Stats(ctx, since)
+}
+
+// CreateTemplate validates and persists a reusable template.
+func (s *Service) CreateTemplate(ctx context.Context, input TemplateInput) (*Template, error) {
+	validated, err := ValidateTemplate(input)
+	if err != nil {
+		return nil, err
+	}
+
+	id, err := uuid.NewV7()
+	if err != nil {
+		return nil, fmt.Errorf("generate template id: %w", err)
+	}
+
+	now := s.now().UTC()
+	template := &Template{
+		ID:        id,
+		Name:      validated.Name,
+		Channel:   validated.Channel,
+		Subject:   stringPointer(validated.Subject),
+		Content:   validated.Content,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	return s.store.CreateTemplate(ctx, template)
+}
+
+// GetTemplate returns one template.
+func (s *Service) GetTemplate(ctx context.Context, id uuid.UUID) (*Template, error) {
+	return s.store.GetTemplate(ctx, id)
+}
+
+// ListTemplates returns all templates.
+func (s *Service) ListTemplates(ctx context.Context) ([]Template, error) {
+	return s.store.ListTemplates(ctx)
 }
 
 func (s *Service) enqueueSingle(ctx context.Context, n *Notification) (*Notification, bool, error) {

@@ -14,8 +14,8 @@
 - M2 complete.
 - M3: idempotency, cancellation races, failure injection, and stale claims are implemented. Repository integration tests are next.
 - M4 complete.
-- M5: Compose, README, tests, CI, and OpenAPI validation are in place. The release and smoke target are pending.
-- M6: scheduled notifications, failure handling, and CI/CD are done. Templates, WebSocket updates, distributed tracing, the load test, and the metrics profile are pending.
+- M5 in progress: Compose, README, unit/contract tests, CI, OpenAPI validation, and the v1.0.0 release are in place. Repository integration tests and a Compose smoke target are still pending.
+- M6 complete: scheduled notifications, templates, WebSocket updates, distributed tracing, dead-letter retry, the k6 load test, and the Prometheus/Grafana profile are implemented.
 
 ## 2. Milestones
 
@@ -109,6 +109,10 @@ feat: add provider adapter with retry classification
 feat: add per-channel rate limiting
 feat: add idempotency keys and replay handling
 feat: add Prometheus metrics and stats endpoint
+feat: add message templates and dead-letter retry
+feat: stream status updates over WebSocket
+feat: add OpenTelemetry tracing and Jaeger profile
+feat: add k6 load test and Prometheus/Grafana profile
 test: add integration tests for worker pipeline
 ci: add lint, test, and build workflow
 docs: add README quickstart and API examples

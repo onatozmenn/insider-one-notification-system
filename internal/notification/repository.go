@@ -16,6 +16,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const templateColumns = `id, name, channel, subject, content, created_at, updated_at`
+
 const notificationColumns = `id, batch_id, recipient, channel, subject, content, priority, status,
 	attempt_count, max_attempts, scheduled_at, next_attempt_at,
 	provider_message_id, last_error, correlation_id, created_at, updated_at,
@@ -264,6 +266,30 @@ func (r *Repository) Cancel(ctx context.Context, id uuid.UUID) (*Notification, e
 	return n, nil
 }
 
+// Retry resets a failed or dead-letter notification to pending.
+func (r *Repository) Retry(ctx context.Context, id uuid.UUID) (*Notification, error) {
+	n, err := r.updateWithEvent(ctx, id,
+		`UPDATE notifications
+		 SET status = 'pending', attempt_count = 0, last_error = NULL,
+		     next_attempt_at = NULL, updated_at = now()
+		 WHERE id = $1 AND status IN ('failed', 'dead_letter')
+		 RETURNING `+notificationColumns,
+		[]any{id},
+		func(*Notification) map[string]any {
+			return map[string]any{"source": "api", "action": "retry"}
+		},
+	)
+	if errors.Is(err, ErrNotClaimable) {
+		if _, getErr := r.Get(ctx, id); errors.Is(getErr, ErrNotFound) {
+			return nil, ErrNotFound
+		} else if getErr != nil {
+			return nil, getErr
+		}
+		return nil, ErrNotRetryable
+	}
+	return n, err
+}
+
 // GetBatch returns a batch summary with counts.
 func (r *Repository) GetBatch(ctx context.Context, id uuid.UUID) (*Batch, error) {
 	var batch Batch
@@ -401,6 +427,79 @@ func (r *Repository) GetIdempotency(ctx context.Context, scope, key string) (*Id
 	}
 
 	return &record, nil
+}
+
+// CreateTemplate inserts a reusable message template.
+func (r *Repository) CreateTemplate(ctx context.Context, template *Template) (*Template, error) {
+	row := r.db.QueryRow(ctx,
+		`INSERT INTO templates (id, name, channel, subject, content, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 RETURNING `+templateColumns,
+		template.ID,
+		template.Name,
+		string(template.Channel),
+		optionalString(template.Subject),
+		template.Content,
+		template.CreatedAt,
+		template.UpdatedAt,
+	)
+
+	created, err := scanTemplate(row)
+	if err != nil {
+		if IsTemplateNameConflict(err) {
+			return nil, ErrTemplateExists
+		}
+		return nil, fmt.Errorf("create template: %w", err)
+	}
+	return created, nil
+}
+
+// GetTemplate returns one template by ID.
+func (r *Repository) GetTemplate(ctx context.Context, id uuid.UUID) (*Template, error) {
+	row := r.db.QueryRow(ctx, `SELECT `+templateColumns+` FROM templates WHERE id = $1`, id)
+	template, err := scanTemplate(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrTemplateNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get template: %w", err)
+	}
+	return template, nil
+}
+
+// GetTemplateByName returns one template by unique name.
+func (r *Repository) GetTemplateByName(ctx context.Context, name string) (*Template, error) {
+	row := r.db.QueryRow(ctx, `SELECT `+templateColumns+` FROM templates WHERE name = $1`, name)
+	template, err := scanTemplate(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrTemplateNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get template by name: %w", err)
+	}
+	return template, nil
+}
+
+// ListTemplates returns all templates ordered by name.
+func (r *Repository) ListTemplates(ctx context.Context) ([]Template, error) {
+	rows, err := r.db.Query(ctx, `SELECT `+templateColumns+` FROM templates ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list templates: %w", err)
+	}
+	defer rows.Close()
+
+	templates := make([]Template, 0)
+	for rows.Next() {
+		template, err := scanTemplate(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan template: %w", err)
+		}
+		templates = append(templates, *template)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate templates: %w", err)
+	}
+	return templates, nil
 }
 
 // MarkQueued moves a pending row to queued after a successful enqueue.
@@ -606,6 +705,39 @@ func IsIdempotencyConflict(err error) bool {
 	return errors.As(err, &pgErr) &&
 		pgErr.Code == "23505" &&
 		pgErr.ConstraintName == "idempotency_keys_pkey"
+}
+
+func scanTemplate(row rowScanner) (*Template, error) {
+	var (
+		template Template
+		channel  string
+		subject  sql.NullString
+	)
+
+	err := row.Scan(
+		&template.ID,
+		&template.Name,
+		&channel,
+		&subject,
+		&template.Content,
+		&template.CreatedAt,
+		&template.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	template.Channel = Channel(channel)
+	template.Subject = nullStringPtr(subject)
+	return &template, nil
+}
+
+// IsTemplateNameConflict reports whether the template name unique constraint failed.
+func IsTemplateNameConflict(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == "23505" &&
+		pgErr.ConstraintName == "templates_name_key"
 }
 
 func insertEvent(ctx context.Context, tx pgx.Tx, notificationID uuid.UUID, status Status, detail []byte) error {

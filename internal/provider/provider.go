@@ -10,6 +10,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // Message is the provider-facing payload for one notification.
@@ -89,6 +92,7 @@ func (c *Client) Send(ctx context.Context, message Message) (Result, error) {
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Request-ID", message.CorrelationID)
 	request.Header.Set("Idempotency-Key", message.ID)
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(request.Header))
 
 	response, err := c.httpClient.Do(request)
 	if err != nil {
