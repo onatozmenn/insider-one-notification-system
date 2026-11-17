@@ -240,19 +240,22 @@ curl -s http://localhost:8080/api/v1/stats
 ## Testing
 
 ```bash
-make test          # unit and contract tests with the race detector
-make test-unit
-make openapi-lint  # Redocly lint for the OpenAPI spec
-make load-test     # k6 create throughput, requires k6 and a running stack
+make test           # unit + integration + coverage (Docker required for integration)
+make test-unit      # unit and contract tests with the race detector
+make test-integration # real PostgreSQL and Redis
+make coverage       # domain coverage report
+make smoke          # end-to-end check against the running stack
+make openapi-lint   # Redocly lint for the OpenAPI spec
+make load-test      # k6 create throughput, requires k6 and a running stack
 ```
 
-The current suite covers validation, idempotency and service rules, templates and rendering, API handlers, WebSocket frames, provider responses (202, 400, 429, 500, timeout), worker transitions, retry backoff, priority mapping, and tracing endpoint handling. Provider tests use `httptest` and do not depend on webhook.site.
+The suite covers validation, idempotency and service rules, templates and rendering, API handlers, WebSocket frames, provider responses (202, 400, 429, 500, timeout), worker transitions, retry backoff, priority mapping, tracing endpoint handling, repository transitions, job queueing, the reconciler, and Redis pub/sub. Provider tests use `httptest` and do not depend on webhook.site.
 
-Repository integration tests with testcontainers and a Compose smoke target are the next additions. The manual end-to-end checks below were run against the Compose stack and the bonus features were exercised the same way.
+Integration tests use testcontainers locally and GitHub Actions service containers in CI. Current coverage is 75.8% for `internal/notification` and 70.3% for `internal/delivery`. The manual end-to-end checks below were run against the Compose stack and the bonus features were exercised the same way.
 
 ## Verified end-to-end
 
-On 2026-11-17, against the local Compose stack and webhook.site:
+On 2026-11-18, against the local Compose stack and webhook.site:
 
 - Single notification: `202` with `queued`, then `accepted` with attempt 1 and a provider message ID.
 - Batch of three: `processing` with queued counts, then all three accepted.
@@ -270,7 +273,8 @@ On 2026-11-17, against the local Compose stack and webhook.site:
 - k6 burst (20 VUs, 5 seconds): 4468 creates, 0% failed, p95 27.9 ms.
 - Under that burst, Prometheus showed 15.5 SMS provider calls/s with a 4468-deep queue: below the 100/s per-channel cap, with provider latency as the bottleneck.
 - Prometheus targets for API and worker were `up`; Grafana loaded the provisioned dashboard and datasource.
-- CI: test, lint, Docker build, and OpenAPI lint passed.
+- `make smoke`: one notification and a batch of three reached `accepted`; `/stats` returned counts.
+- CI: unit, integration, coverage, lint, Docker build, and OpenAPI lint passed.
 
 ## Documentation
 
@@ -295,4 +299,3 @@ On 2026-11-17, against the local Compose stack and webhook.site:
 - A Redis flush loses queued tasks. The reconciler recovers `pending` rows, not in-flight tasks.
 - Offset pagination can shift when new rows arrive during a scan.
 - WebSocket updates are best-effort. A client that misses a frame can re-read the notification; there is no replay buffer.
-- Repository integration tests and the Compose smoke target are not implemented yet.
