@@ -211,7 +211,7 @@ LIMIT 50;
 ### Redis is down
 
 - `/readyz` returns `503`.
-- The API accepts creates as `pending` and returns `202`. The reconciler enqueues them when Redis returns.
+- The API accepts creates as `pending` and returns `202`. The reconciler enqueues them when Redis returns. Queued rows that lost their task are re-enqueued after 15 minutes.
 - The worker cannot consume.
 - Use an `Idempotency-Key` if the client may retry a create during the outage.
 - Restart Redis and watch the queue drain.

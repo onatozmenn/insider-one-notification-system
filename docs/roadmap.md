@@ -51,7 +51,7 @@
 | M2-4 | Priority queues | `high`, `normal`, `low` with weights. |
 | M2-5 | Per-channel rate limiting | 100/s shared through Redis, burst 1. |
 | M2-6 | Retry and dead letter | Classification, backoff, max attempts. |
-| M2-7 | Reconciler | Pending rows enqueued after a crash or Redis outage. |
+| M2-7 | Reconciler | Pending, due scheduled, and stale queued rows enqueued after a crash or Redis outage. |
 
 ### M3 — Reliability
 

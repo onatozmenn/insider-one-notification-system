@@ -123,7 +123,7 @@ RETURNING *;
 
 If zero rows change, the worker stops. Another worker or a cancellation already moved the row.
 
-A `processing` row can be reclaimed after its lease expires. The guarded update adds `OR (status = 'processing' AND updated_at < now() - interval '2 minutes')`. This recovers a worker crash without leaving the notification stuck forever. The lease is longer than the provider timeout.
+A `processing` row can be reclaimed after its lease expires. The guarded update adds `OR (status = 'processing' AND updated_at < now() - interval '2 minutes' AND attempt_count < max_attempts)`. If every attempt is already used, the worker moves the row to `dead_letter` instead of reclaiming it. This recovers a worker crash without exceeding `attempt_count <= max_attempts`.
 
 ## 4. Tables
 
@@ -187,7 +187,7 @@ Events power the status timeline and the WebSocket feed. They are written in the
 | `response_status` | `int` | Stored response status. |
 | `response_body` | `jsonb` | Reserved; the MVP replays through `resource_id`. |
 | `created_at` | `timestamptz` | Default `now()`. |
-| `expires_at` | `timestamptz` | Default `now() + interval '24 hours'`. |
+| `expires_at` | `timestamptz` | Default `now() + interval '24 hours'`. Expired keys are deleted on read and by an hourly cleanup. |
 
 Primary key: `(scope, key)`.
 
@@ -198,7 +198,7 @@ Primary key: `(scope, key)`.
 3. Insert the idempotency row as `completed` with `resource_id` and `response_status`.
 4. Commit.
 
-If the transaction fails, nothing is committed and a retry starts cleanly. A concurrent request with the same key gets a unique violation, reads the completed row, and replays the resource. The `in_progress` state is reserved for a future multi-step create. Enqueue happens after commit; if it fails, the notification stays `pending` and the reconciler recovers it.
+If the transaction fails, nothing is committed and a retry starts cleanly. A concurrent request with the same key gets a unique violation, reads the completed row, and replays the resource. The `in_progress` state is reserved for a future multi-step create. Enqueue happens after commit; if it fails, the notification stays `pending` and the reconciler recovers it. An expired key is removed when read, so it can be reused after 24 hours.
 
 ### `templates`
 
