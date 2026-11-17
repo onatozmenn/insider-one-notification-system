@@ -171,7 +171,7 @@ For host runs, set:
 ```bash
 export DATABASE_URL=postgres://postgres:postgres@localhost:5433/notifications?sslmode=disable
 export REDIS_ADDR=localhost:6379
-export PROVIDER_BASE_URL=https://webhook.site/<your-uuid>
+export PROVIDER_BASE_URL="https://webhook.site/<your-uuid>"
 ```
 
 ## 9. Runbook
