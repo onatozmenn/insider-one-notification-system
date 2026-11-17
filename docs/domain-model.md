@@ -251,6 +251,10 @@ CREATE INDEX idx_notifications_scheduled
     ON notifications (scheduled_at)
     WHERE status = 'scheduled';
 
+CREATE INDEX idx_notifications_queued_updated
+    ON notifications (updated_at)
+    WHERE status = 'queued';
+
 CREATE INDEX idx_notification_events_notification
     ON notification_events (notification_id, created_at);
 
