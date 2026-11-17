@@ -3,6 +3,7 @@ package notification
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -337,6 +338,203 @@ func (r *Repository) GetIdempotency(ctx context.Context, scope, key string) (*Id
 	}
 
 	return &record, nil
+}
+
+// MarkQueued moves a pending row to queued after a successful enqueue.
+func (r *Repository) MarkQueued(ctx context.Context, id uuid.UUID) (*Notification, error) {
+	n, err := r.updateWithEvent(ctx, id,
+		`UPDATE notifications SET status = 'queued', updated_at = now()
+		 WHERE id = $1 AND status = 'pending'
+		 RETURNING `+notificationColumns,
+		[]any{id},
+		func(*Notification) map[string]any {
+			return map[string]any{"source": "api", "action": "enqueue"}
+		},
+	)
+	if errors.Is(err, ErrNotClaimable) {
+		return r.Get(ctx, id)
+	}
+	return n, err
+}
+
+// ListPending returns pending rows older than the cutoff.
+func (r *Repository) ListPending(ctx context.Context, olderThan time.Time, limit int) ([]Notification, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+
+	rows, err := r.db.Query(ctx,
+		`SELECT `+notificationColumns+`
+		 FROM notifications
+		 WHERE status = 'pending' AND created_at < $1
+		 ORDER BY created_at
+		 LIMIT $2`,
+		olderThan, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list pending notifications: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]Notification, 0, limit)
+	for rows.Next() {
+		n, err := scanNotification(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan pending notification: %w", err)
+		}
+		items = append(items, *n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pending notifications: %w", err)
+	}
+
+	return items, nil
+}
+
+// Claim moves a claimable row to processing and increments the attempt count.
+func (r *Repository) Claim(ctx context.Context, id uuid.UUID, now time.Time, lease time.Duration) (*Notification, error) {
+	now = now.UTC()
+	staleBefore := now.Add(-lease)
+
+	return r.updateWithEvent(ctx, id,
+		`UPDATE notifications
+		 SET status = 'processing', attempt_count = attempt_count + 1, updated_at = $2
+		 WHERE id = $1
+		   AND (
+		     status IN ('pending', 'queued')
+		     OR (status = 'scheduled' AND scheduled_at <= $2)
+		     OR (status = 'processing' AND updated_at < $3)
+		   )
+		 RETURNING `+notificationColumns,
+		[]any{id, now, staleBefore},
+		func(n *Notification) map[string]any {
+			return map[string]any{
+				"source":  "worker",
+				"action":  "claim",
+				"attempt": n.AttemptCount,
+			}
+		},
+	)
+}
+
+// MarkAccepted records a provider acceptance.
+func (r *Repository) MarkAccepted(ctx context.Context, id uuid.UUID, providerMessageID string, now time.Time) (*Notification, error) {
+	var messageID any
+	if providerMessageID != "" {
+		messageID = providerMessageID
+	}
+
+	return r.updateWithEvent(ctx, id,
+		`UPDATE notifications
+		 SET status = 'accepted', accepted_at = $2, provider_message_id = $3,
+		     last_error = NULL, updated_at = $2
+		 WHERE id = $1 AND status = 'processing'
+		 RETURNING `+notificationColumns,
+		[]any{id, now.UTC(), messageID},
+		func(*Notification) map[string]any {
+			return map[string]any{
+				"source":              "worker",
+				"action":              "accept",
+				"provider_message_id": providerMessageID,
+			}
+		},
+	)
+}
+
+// MarkFailed records a permanent failure.
+func (r *Repository) MarkFailed(ctx context.Context, id uuid.UUID, message string, now time.Time) (*Notification, error) {
+	return r.updateWithEvent(ctx, id,
+		`UPDATE notifications
+		 SET status = 'failed', last_error = $2, updated_at = $3
+		 WHERE id = $1 AND status = 'processing'
+		 RETURNING `+notificationColumns,
+		[]any{id, message, now.UTC()},
+		func(*Notification) map[string]any {
+			return map[string]any{"source": "worker", "action": "fail", "error": message}
+		},
+	)
+}
+
+// MarkDeadLetter records exhausted retries.
+func (r *Repository) MarkDeadLetter(ctx context.Context, id uuid.UUID, message string, now time.Time) (*Notification, error) {
+	return r.updateWithEvent(ctx, id,
+		`UPDATE notifications
+		 SET status = 'dead_letter', last_error = $2, updated_at = $3
+		 WHERE id = $1 AND status = 'processing'
+		 RETURNING `+notificationColumns,
+		[]any{id, message, now.UTC()},
+		func(*Notification) map[string]any {
+			return map[string]any{"source": "worker", "action": "dead_letter", "error": message}
+		},
+	)
+}
+
+// MarkQueuedForRetry returns a row to queued with the next attempt time.
+func (r *Repository) MarkQueuedForRetry(
+	ctx context.Context,
+	id uuid.UUID,
+	message string,
+	nextAttempt time.Time,
+	now time.Time,
+) (*Notification, error) {
+	return r.updateWithEvent(ctx, id,
+		`UPDATE notifications
+		 SET status = 'queued', last_error = $2, next_attempt_at = $3, updated_at = $4
+		 WHERE id = $1 AND status = 'processing'
+		 RETURNING `+notificationColumns,
+		[]any{id, message, nextAttempt.UTC(), now.UTC()},
+		func(*Notification) map[string]any {
+			return map[string]any{
+				"source":          "worker",
+				"action":          "retry",
+				"error":           message,
+				"next_attempt_at": nextAttempt.UTC(),
+			}
+		},
+	)
+}
+
+func (r *Repository) updateWithEvent(
+	ctx context.Context,
+	id uuid.UUID,
+	query string,
+	args []any,
+	detail func(*Notification) map[string]any,
+) (*Notification, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transition: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	n, err := scanNotification(tx.QueryRow(ctx, query, args...))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotClaimable
+	}
+	if err != nil {
+		return nil, fmt.Errorf("transition notification: %w", err)
+	}
+
+	payload := map[string]any{"source": "worker"}
+	if detail != nil {
+		payload = detail(n)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		encoded = []byte(`{"source":"worker"}`)
+	}
+
+	if err := insertEvent(ctx, tx, n.ID, n.Status, encoded); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit transition: %w", err)
+	}
+
+	return n, nil
 }
 
 // IsIdempotencyConflict reports whether the error is the idempotency primary key.
