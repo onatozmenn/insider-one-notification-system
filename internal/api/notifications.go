@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/onatozmenn/insider-one-notification-system/internal/notification"
+	"github.com/onatozmenn/insider-one-notification-system/internal/platform/metrics"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/requestid"
 )
 
@@ -26,15 +27,34 @@ type NotificationService interface {
 	List(ctx context.Context, filter notification.ListFilter) ([]notification.Notification, int, error)
 	Cancel(ctx context.Context, id uuid.UUID) (*notification.Notification, error)
 	GetBatch(ctx context.Context, id uuid.UUID) (*notification.Batch, error)
+	Stats(ctx context.Context, since time.Time) (notification.Stats, error)
+}
+
+// QueueDepthProvider exposes current queue depth for the stats endpoint.
+type QueueDepthProvider interface {
+	Depth(ctx context.Context) map[string]int
 }
 
 type notificationHandler struct {
-	service NotificationService
-	logger  *slog.Logger
+	service    NotificationService
+	queueDepth QueueDepthProvider
+	metrics    *metrics.Metrics
+	logger     *slog.Logger
 }
 
-func registerNotificationRoutes(r chi.Router, service NotificationService, log *slog.Logger) {
-	h := &notificationHandler{service: service, logger: log}
+func registerNotificationRoutes(
+	r chi.Router,
+	service NotificationService,
+	queueDepth QueueDepthProvider,
+	appMetrics *metrics.Metrics,
+	log *slog.Logger,
+) {
+	h := &notificationHandler{
+		service:    service,
+		queueDepth: queueDepth,
+		metrics:    appMetrics,
+		logger:     log,
+	}
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Post("/notifications", h.create)
@@ -43,6 +63,7 @@ func registerNotificationRoutes(r chi.Router, service NotificationService, log *
 		r.Get("/notifications/{id}", h.get)
 		r.Post("/notifications/{id}/cancel", h.cancel)
 		r.Get("/batches/{id}", h.getBatch)
+		r.Get("/stats", h.stats)
 	})
 }
 
@@ -69,6 +90,9 @@ func (h *notificationHandler) create(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err)
 		return
 	}
+
+	h.metrics.IncCreated(string(created.Channel), string(created.Priority))
+	h.metrics.IncStatus(string(created.Channel), string(created.Status))
 
 	w.Header().Set("Location", "/api/v1/notifications/"+created.ID.String())
 	if replayed {
@@ -170,6 +194,21 @@ func (h *notificationHandler) cancel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, n)
+}
+
+func (h *notificationHandler) stats(w http.ResponseWriter, r *http.Request) {
+	stats, err := h.service.Stats(r.Context(), time.Now().Add(-5*time.Minute))
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	stats.Window = "5m"
+	if h.queueDepth != nil {
+		stats.QueueDepth = h.queueDepth.Depth(r.Context())
+	}
+
+	writeJSON(w, http.StatusOK, stats)
 }
 
 func (h *notificationHandler) getBatch(w http.ResponseWriter, r *http.Request) {

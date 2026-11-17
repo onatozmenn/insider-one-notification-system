@@ -17,8 +17,10 @@ import (
 	"github.com/onatozmenn/insider-one-notification-system/internal/notification"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/config"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/logger"
+	"github.com/onatozmenn/insider-one-notification-system/internal/platform/metrics"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/postgres"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/redis"
+	"github.com/onatozmenn/insider-one-notification-system/internal/platform/version"
 )
 
 func main() {
@@ -65,6 +67,12 @@ func run() error {
 		WithEnqueuer(queue).
 		WithLogger(log)
 
+	appMetrics := metrics.New()
+	build := version.Build()
+	appMetrics.SetBuildInfo(build.Version, build.Commit, build.Date)
+
+	go delivery.PollQueueDepth(ctx, queue, appMetrics, 5*time.Second)
+
 	router := api.NewRouter(api.Dependencies{
 		Logger: log,
 		Readiness: api.ReadinessChecks{
@@ -74,6 +82,8 @@ func run() error {
 			},
 		},
 		Notifications: notifications,
+		Metrics:       appMetrics,
+		QueueDepth:    queue,
 	})
 
 	server := &http.Server{

@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/accesslog"
+	"github.com/onatozmenn/insider-one-notification-system/internal/platform/metrics"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/requestid"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/version"
 )
@@ -27,6 +28,8 @@ type Dependencies struct {
 	Logger        *slog.Logger
 	Readiness     ReadinessChecks
 	Notifications NotificationService
+	Metrics       *metrics.Metrics
+	QueueDepth    QueueDepthProvider
 }
 
 // NewRouter builds the HTTP router. Feature routes are added as their
@@ -34,7 +37,7 @@ type Dependencies struct {
 func NewRouter(deps Dependencies) http.Handler {
 	r := chi.NewRouter()
 	r.Use(requestid.Middleware)
-	r.Use(accesslog.Middleware(deps.Logger))
+	r.Use(accesslog.Middleware(deps.Logger, deps.Metrics))
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 
@@ -42,8 +45,12 @@ func NewRouter(deps Dependencies) http.Handler {
 	r.Get("/healthz", healthz)
 	r.Get("/readyz", readyz(deps.Readiness, deps.Logger))
 
+	if deps.Metrics != nil {
+		r.Handle("/metrics", deps.Metrics.Handler())
+	}
+
 	if deps.Notifications != nil {
-		registerNotificationRoutes(r, deps.Notifications, deps.Logger)
+		registerNotificationRoutes(r, deps.Notifications, deps.QueueDepth, deps.Metrics, deps.Logger)
 	}
 
 	return r

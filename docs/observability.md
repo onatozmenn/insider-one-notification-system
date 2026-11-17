@@ -2,7 +2,7 @@
 
 ## 1. Metrics
 
-Prometheus format at `/metrics`.
+Prometheus format at `/metrics` on the API (`8080`) and the worker (`9091`). The API exposes HTTP, create, and queue-depth metrics. The worker exposes provider, rate-limit, queue-wait, and processing metrics.
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |

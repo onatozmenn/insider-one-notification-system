@@ -65,7 +65,8 @@ The stack exposes:
 | --- | --- |
 | `http://localhost:8080/docs` | Swagger UI |
 | `http://localhost:8080/api/v1/stats` | Queue depth, success rate, p95 |
-| `http://localhost:8080/metrics` | Prometheus metrics |
+| `http://localhost:8080/metrics` | API Prometheus metrics |
+| `http://localhost:9091/metrics` | Worker Prometheus metrics |
 | `http://localhost:8080/healthz` | Liveness |
 | `http://localhost:8080/readyz` | PostgreSQL and Redis readiness |
 
