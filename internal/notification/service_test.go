@@ -20,6 +20,7 @@ type fakeStore struct {
 	getBatchFn       func(context.Context, uuid.UUID) (*Batch, error)
 	getIdempotencyFn func(context.Context, string, string) (*IdempotencyRecord, error)
 	markQueuedFn     func(context.Context, uuid.UUID) (*Notification, error)
+	statsFn          func(context.Context, time.Time) (Stats, error)
 }
 
 func (f *fakeStore) Create(ctx context.Context, n *Notification, detail []byte, idem *IdempotencyRecord) (*Notification, error) {
@@ -76,6 +77,13 @@ func (f *fakeStore) MarkQueued(ctx context.Context, id uuid.UUID) (*Notification
 		return nil, errors.New("unexpected MarkQueued call")
 	}
 	return f.markQueuedFn(ctx, id)
+}
+
+func (f *fakeStore) Stats(ctx context.Context, since time.Time) (Stats, error) {
+	if f.statsFn == nil {
+		return Stats{}, nil
+	}
+	return f.statsFn(ctx, since)
 }
 
 type fakeEnqueuer struct {

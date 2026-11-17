@@ -13,6 +13,7 @@ import (
 type Config struct {
 	AppEnv             string        `env:"APP_ENV" envDefault:"development"`
 	HTTPAddr           string        `env:"HTTP_ADDR" envDefault:":8080"`
+	WorkerMetricsAddr  string        `env:"WORKER_METRICS_ADDR" envDefault:":9090"`
 	DatabaseURL        string        `env:"DATABASE_URL,required"`
 	RedisAddr          string        `env:"REDIS_ADDR" envDefault:"localhost:6379"`
 	RedisPassword      string        `env:"REDIS_PASSWORD"`
@@ -46,6 +47,9 @@ func (c Config) Validate() error {
 	}
 	if c.RedisAddr == "" {
 		return fmt.Errorf("REDIS_ADDR is required")
+	}
+	if c.WorkerMetricsAddr == "" {
+		return fmt.Errorf("WORKER_METRICS_ADDR is required")
 	}
 
 	u, err := url.Parse(c.ProviderBaseURL)

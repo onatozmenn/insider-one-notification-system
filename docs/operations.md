@@ -25,7 +25,8 @@ When the stack is healthy:
 | `http://localhost:8080/openapi.yaml` | OpenAPI spec |
 | `http://localhost:8080/healthz` | Liveness |
 | `http://localhost:8080/readyz` | Readiness |
-| `http://localhost:8080/metrics` | Prometheus metrics |
+| `http://localhost:8080/metrics` | API Prometheus metrics |
+| `http://localhost:9091/metrics` | Worker Prometheus metrics |
 | `http://localhost:8080/api/v1/stats` | Human-readable stats |
 | `http://localhost:8081` | API directly, bypassing the gateway |
 
@@ -49,7 +50,7 @@ docker compose --profile tracing up
 | `postgres` | internal | Not exposed by default. |
 | `redis` | internal | Not exposed by default. |
 | `migrate` | none | Runs once and exits. |
-| `worker` | none | No inbound traffic. |
+| `worker` | `9091` (`WORKER_METRICS_PORT`) | Worker metrics only. No inbound API traffic. |
 | `asynqmon` | `8083` | Optional `tools` profile. |
 | `jaeger` | `16686` | Optional `tracing` profile. |
 
@@ -73,6 +74,8 @@ Copy `.env.example` to `.env` for local overrides. Docker Compose reads `.env` a
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | Enables tracing when set. |
 | `WS_ENABLED` | `true` | Enables the WebSocket hub. |
+| `WORKER_METRICS_ADDR` | `:9090` | Worker metrics listen address inside the container. |
+| `WORKER_METRICS_PORT` | `9091` | Compose host port for worker metrics. |
 
 Do not commit `.env`. The repository contains `.env.example` only.
 

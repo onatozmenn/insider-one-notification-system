@@ -24,6 +24,7 @@ type Store interface {
 	GetBatch(ctx context.Context, id uuid.UUID) (*Batch, error)
 	GetIdempotency(ctx context.Context, scope, key string) (*IdempotencyRecord, error)
 	MarkQueued(ctx context.Context, id uuid.UUID) (*Notification, error)
+	Stats(ctx context.Context, since time.Time) (Stats, error)
 }
 
 // Enqueuer submits a persisted notification to the delivery queue.
@@ -272,6 +273,11 @@ func (s *Service) Cancel(ctx context.Context, id uuid.UUID) (*Notification, erro
 // GetBatch returns a batch summary.
 func (s *Service) GetBatch(ctx context.Context, id uuid.UUID) (*Batch, error) {
 	return s.store.GetBatch(ctx, id)
+}
+
+// Stats returns delivery counts and latency since the cutoff.
+func (s *Service) Stats(ctx context.Context, since time.Time) (Stats, error) {
+	return s.store.Stats(ctx, since)
 }
 
 func (s *Service) enqueueSingle(ctx context.Context, n *Notification) (*Notification, bool, error) {

@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/go-redis/redis_rate/v10"
 	"github.com/hibiken/asynq"
@@ -14,8 +17,10 @@ import (
 	"github.com/onatozmenn/insider-one-notification-system/internal/notification"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/config"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/logger"
+	"github.com/onatozmenn/insider-one-notification-system/internal/platform/metrics"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/postgres"
 	redisplatform "github.com/onatozmenn/insider-one-notification-system/internal/platform/redis"
+	"github.com/onatozmenn/insider-one-notification-system/internal/platform/version"
 	"github.com/onatozmenn/insider-one-notification-system/internal/provider"
 )
 
@@ -56,6 +61,22 @@ func run() error {
 		Password: cfg.RedisPassword,
 	}
 
+	appMetrics := metrics.New()
+	build := version.Build()
+	appMetrics.SetBuildInfo(build.Version, build.Commit, build.Date)
+
+	metricsServer := &http.Server{
+		Addr:              cfg.WorkerMetricsAddr,
+		Handler:           appMetrics.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() {
+		log.Info("worker metrics listening", "addr", cfg.WorkerMetricsAddr)
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Warn("worker metrics server stopped", "error", err)
+		}
+	}()
+
 	queue := delivery.NewQueue(redisOptions, cfg.MaxAttempts-1, log)
 	defer func() {
 		_ = queue.Close()
@@ -70,6 +91,7 @@ func run() error {
 		Repository:    repository,
 		Provider:      providerClient,
 		Limiter:       limiter,
+		Metrics:       appMetrics,
 		Logger:        log,
 		Concurrency:   cfg.WorkerConcurrency,
 		RatePerSecond: cfg.RateLimitPerSecond,
@@ -95,6 +117,11 @@ func run() error {
 	}
 
 	<-reconcilerDone
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = metricsServer.Shutdown(shutdownCtx)
+
 	log.Info("worker stopped")
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -303,6 +304,68 @@ func (r *Repository) GetBatch(ctx context.Context, id uuid.UUID) (*Batch, error)
 	batch.Status = DeriveBatchStatus(counts, batch.Total)
 
 	return &batch, nil
+}
+
+// Stats returns delivery counts and acceptance latency since the cutoff.
+func (r *Repository) Stats(ctx context.Context, since time.Time) (Stats, error) {
+	stats := Stats{
+		Counts: map[Status]int{
+			StatusAccepted:   0,
+			StatusFailed:     0,
+			StatusDeadLetter: 0,
+		},
+	}
+
+	rows, err := r.db.Query(ctx,
+		`SELECT status, count(*)
+		 FROM notifications
+		 WHERE updated_at >= $1 AND status IN ('accepted', 'failed', 'dead_letter')
+		 GROUP BY status`,
+		since,
+	)
+	if err != nil {
+		return Stats{}, fmt.Errorf("count delivery outcomes: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			status string
+			count  int
+		)
+		if err := rows.Scan(&status, &count); err != nil {
+			return Stats{}, fmt.Errorf("scan delivery outcome: %w", err)
+		}
+		stats.Counts[Status(status)] = count
+	}
+	if err := rows.Err(); err != nil {
+		return Stats{}, fmt.Errorf("iterate delivery outcomes: %w", err)
+	}
+
+	var p95Seconds float64
+	err = r.db.QueryRow(ctx,
+		`SELECT COALESCE(
+		     percentile_cont(0.95) WITHIN GROUP (
+		       ORDER BY EXTRACT(EPOCH FROM (accepted_at - created_at))
+		     ),
+		     0
+		   )
+		 FROM notifications
+		 WHERE accepted_at IS NOT NULL AND accepted_at >= $1`,
+		since,
+	).Scan(&p95Seconds)
+	if err != nil {
+		return Stats{}, fmt.Errorf("compute acceptance latency: %w", err)
+	}
+
+	accepted := stats.Counts[StatusAccepted]
+	total := accepted + stats.Counts[StatusFailed] + stats.Counts[StatusDeadLetter]
+	if total > 0 {
+		stats.SuccessRate = float64(accepted) / float64(total)
+	}
+	stats.P95LatencyMS = int64(math.Round(p95Seconds * 1000))
+
+	return stats, nil
 }
 
 // GetIdempotency returns a non-expired idempotency record.

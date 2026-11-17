@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -24,6 +25,7 @@ type fakeNotificationService struct {
 	listFn        func(context.Context, notification.ListFilter) ([]notification.Notification, int, error)
 	cancelFn      func(context.Context, uuid.UUID) (*notification.Notification, error)
 	getBatchFn    func(context.Context, uuid.UUID) (*notification.Batch, error)
+	statsFn       func(context.Context, time.Time) (notification.Stats, error)
 }
 
 func (f *fakeNotificationService) Create(
@@ -79,6 +81,13 @@ func (f *fakeNotificationService) GetBatch(ctx context.Context, id uuid.UUID) (*
 		return nil, errors.New("unexpected GetBatch call")
 	}
 	return f.getBatchFn(ctx, id)
+}
+
+func (f *fakeNotificationService) Stats(ctx context.Context, since time.Time) (notification.Stats, error) {
+	if f.statsFn == nil {
+		return notification.Stats{}, errors.New("unexpected Stats call")
+	}
+	return f.statsFn(ctx, since)
 }
 
 func testRouter(service NotificationService) http.Handler {
@@ -218,6 +227,46 @@ func TestCancelNotificationConflict(t *testing.T) {
 
 	require.Equal(t, http.StatusConflict, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"code":"not_cancellable"`)
+}
+
+type fakeQueueDepth struct {
+	depth map[string]int
+}
+
+func (f fakeQueueDepth) Depth(context.Context) map[string]int {
+	return f.depth
+}
+
+func TestStats(t *testing.T) {
+	service := &fakeNotificationService{
+		statsFn: func(context.Context, time.Time) (notification.Stats, error) {
+			return notification.Stats{
+				Counts: map[notification.Status]int{
+					notification.StatusAccepted: 10,
+					notification.StatusFailed:   1,
+				},
+				SuccessRate:  0.9,
+				P95LatencyMS: 150,
+			}, nil
+		},
+	}
+
+	router := NewRouter(Dependencies{
+		Logger:        testLogger(),
+		Readiness:     ReadinessChecks{},
+		Notifications: service,
+		QueueDepth:    fakeQueueDepth{depth: map[string]int{"high": 3, "normal": 2}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stats", nil)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"window":"5m"`)
+	assert.Contains(t, rec.Body.String(), `"high":3`)
+	assert.Contains(t, rec.Body.String(), `"success_rate":0.9`)
 }
 
 func TestCreateBatch(t *testing.T) {

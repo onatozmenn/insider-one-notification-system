@@ -64,6 +64,19 @@ func (q *Queue) Inspector() *asynq.Inspector {
 	return q.inspector
 }
 
+// Depth returns the pending + active + scheduled + retry size of each queue.
+func (q *Queue) Depth(_ context.Context) map[string]int {
+	depths := make(map[string]int, 3)
+	for _, name := range []string{QueueHigh, QueueNormal, QueueLow} {
+		info, err := q.inspector.GetQueueInfo(name)
+		if err != nil {
+			continue
+		}
+		depths[name] = info.Pending + info.Active + info.Scheduled + info.Retry
+	}
+	return depths
+}
+
 // Enqueue submits one notification. The task ID is the notification ID, so
 // duplicate enqueues are collapsed while the task is queued.
 func (q *Queue) Enqueue(

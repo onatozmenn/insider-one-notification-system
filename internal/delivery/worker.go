@@ -13,6 +13,7 @@ import (
 	"github.com/hibiken/asynq"
 
 	"github.com/onatozmenn/insider-one-notification-system/internal/notification"
+	"github.com/onatozmenn/insider-one-notification-system/internal/platform/metrics"
 	"github.com/onatozmenn/insider-one-notification-system/internal/provider"
 )
 
@@ -44,6 +45,7 @@ type WorkerOptions struct {
 	Repository    WorkerRepository
 	Provider      WorkerProvider
 	Limiter       WorkerLimiter
+	Metrics       *metrics.Metrics
 	Logger        *slog.Logger
 	Concurrency   int
 	RatePerSecond int
@@ -57,6 +59,7 @@ type Worker struct {
 	repository    WorkerRepository
 	provider      WorkerProvider
 	limiter       WorkerLimiter
+	metrics       *metrics.Metrics
 	logger        *slog.Logger
 	concurrency   int
 	ratePerSecond int
@@ -87,6 +90,7 @@ func NewWorker(options WorkerOptions) *Worker {
 		repository:    options.Repository,
 		provider:      options.Provider,
 		limiter:       options.Limiter,
+		metrics:       options.Metrics,
 		logger:        options.Logger,
 		concurrency:   options.Concurrency,
 		ratePerSecond: options.RatePerSecond,
@@ -173,6 +177,10 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) error {
 		return fmt.Errorf("claim notification: %w", err)
 	}
 
+	w.metrics.ObserveQueueWait(string(claimed.Priority), string(claimed.Channel), time.Since(claimed.CreatedAt))
+	w.metrics.ObserveRateLimitWait(string(claimed.Channel), rateLimitWait)
+	w.metrics.IncStatus(string(claimed.Channel), string(notification.StatusProcessing))
+
 	started := time.Now()
 	result, sendErr := w.provider.Send(ctx, provider.Message{
 		ID:            claimed.ID.String(),
@@ -184,6 +192,10 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) error {
 	duration := time.Since(started)
 
 	if sendErr == nil {
+		w.metrics.ObserveProvider(string(claimed.Channel), "success", duration)
+		w.metrics.IncStatus(string(claimed.Channel), string(notification.StatusAccepted))
+		w.metrics.ObserveProcessing(string(claimed.Channel), string(notification.StatusAccepted), time.Since(claimed.UpdatedAt))
+
 		if _, err := w.repository.MarkAccepted(ctx, claimed.ID, result.MessageID, time.Now().UTC()); err != nil {
 			return fmt.Errorf("mark accepted: %w", err)
 		}
@@ -202,6 +214,9 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) error {
 
 	var providerErr *provider.Error
 	if !errors.As(sendErr, &providerErr) {
+		w.metrics.ObserveProvider(string(claimed.Channel), "transient_error", duration)
+		w.metrics.IncStatus(string(claimed.Channel), string(notification.StatusQueued))
+
 		nextAttempt := time.Now().UTC().Add(RetryDelay(retryCount(ctx), sendErr, task))
 		if _, err := w.repository.MarkQueuedForRetry(ctx, claimed.ID, sendErr.Error(), nextAttempt, time.Now().UTC()); err != nil {
 			return fmt.Errorf("mark retry: %w", err)
@@ -222,6 +237,10 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) error {
 	}
 
 	if !providerErr.Transient {
+		w.metrics.ObserveProvider(string(claimed.Channel), "permanent_error", duration)
+		w.metrics.IncStatus(string(claimed.Channel), string(notification.StatusFailed))
+		w.metrics.ObserveProcessing(string(claimed.Channel), string(notification.StatusFailed), time.Since(claimed.UpdatedAt))
+
 		if _, err := w.repository.MarkFailed(ctx, claimed.ID, message, time.Now().UTC()); err != nil {
 			return fmt.Errorf("mark failed: %w", err)
 		}
@@ -235,7 +254,12 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) error {
 		return nil
 	}
 
+	w.metrics.ObserveProvider(string(claimed.Channel), "transient_error", duration)
+
 	if isLastAttempt(ctx) {
+		w.metrics.IncStatus(string(claimed.Channel), string(notification.StatusDeadLetter))
+		w.metrics.ObserveProcessing(string(claimed.Channel), string(notification.StatusDeadLetter), time.Since(claimed.UpdatedAt))
+
 		if _, err := w.repository.MarkDeadLetter(ctx, claimed.ID, message, time.Now().UTC()); err != nil {
 			return fmt.Errorf("mark dead letter: %w", err)
 		}
@@ -248,6 +272,8 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) error {
 		)
 		return nil
 	}
+
+	w.metrics.IncStatus(string(claimed.Channel), string(notification.StatusQueued))
 
 	nextAttempt := time.Now().UTC().Add(RetryDelay(retryCount(ctx), sendErr, task))
 	if _, err := w.repository.MarkQueuedForRetry(ctx, claimed.ID, message, nextAttempt, time.Now().UTC()); err != nil {
