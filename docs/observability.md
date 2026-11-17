@@ -176,6 +176,7 @@ Open `http://localhost:16686`, choose the `api` or `worker` service, and inspect
 - The worker publishes `{notification_id, channel, status, attempt_count, updated_at}` after each delivery transition: claim, acceptance, retry, permanent failure, and dead letter.
 - The hub filters events by the requested notification ID and sends JSON frames.
 - On connect, the client receives a snapshot of the current notification, then updates.
+- A 2-second poll of the notification row is a fallback when pub/sub is unavailable or a transition is missed. The poll stops when the connection closes. This costs one indexed read per connection every two seconds.
 - Frames are best-effort. There is no replay buffer; a reconnecting client should re-read the notification. `WS_ENABLED=false` disables the route and hub.
 
 ## 9. Grafana

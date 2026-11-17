@@ -299,7 +299,7 @@ The connection opens with a snapshot, then streams status events:
 {"type":"status","event":{"notification_id":"...","channel":"sms","status":"accepted","attempt_count":1,"updated_at":"2026-11-17T17:00:02Z"}}
 ```
 
-The worker publishes events to the Redis channel `notification.events`; the API hub filters by notification ID. Events are best-effort: there is no replay buffer, so a reconnecting client should re-read the notification. The endpoint is disabled when `WS_ENABLED=false`.
+The worker publishes events to the Redis channel `notification.events`; the API hub filters by notification ID. A 2-second database poll backs up the subscription when pub/sub is unavailable or a transition is missed. Frames are best-effort: there is no replay buffer, so a reconnecting client should re-read the notification. The endpoint is disabled when `WS_ENABLED=false`.
 
 ## 11. Batch summary
 

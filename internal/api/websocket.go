@@ -80,6 +80,13 @@ func registerWebSocketRoute(
 			return
 		}
 
+		// Redis pub/sub is the fast path. The ticker is a fallback for a
+		// dropped subscription or an event published while the snapshot was
+		// being read.
+		poll := time.NewTicker(2 * time.Second)
+		defer poll.Stop()
+
+		lastUpdated := snapshot.UpdatedAt
 		for {
 			select {
 			case <-ctx.Done():
@@ -88,9 +95,26 @@ func registerWebSocketRoute(
 				if !ok {
 					return
 				}
-				if !event.UpdatedAt.After(snapshot.UpdatedAt) {
+				if !event.UpdatedAt.After(lastUpdated) {
 					continue
 				}
+				lastUpdated = event.UpdatedAt
+				if err := writeWebSocket(ctx, connection, wsEnvelope{
+					Type:  "status",
+					Event: &event,
+				}); err != nil {
+					return
+				}
+			case <-poll.C:
+				pollCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				current, err := service.Get(pollCtx, id)
+				cancel()
+				if err != nil || !current.UpdatedAt.After(lastUpdated) {
+					continue
+				}
+
+				event := statusEvent(current)
+				lastUpdated = event.UpdatedAt
 				if err := writeWebSocket(ctx, connection, wsEnvelope{
 					Type:  "status",
 					Event: &event,
@@ -100,6 +124,16 @@ func registerWebSocketRoute(
 			}
 		}
 	})
+}
+
+func statusEvent(n *notification.Notification) realtime.StatusEvent {
+	return realtime.StatusEvent{
+		NotificationID: n.ID.String(),
+		Channel:        string(n.Channel),
+		Status:         string(n.Status),
+		AttemptCount:   n.AttemptCount,
+		UpdatedAt:      n.UpdatedAt,
+	}
 }
 
 func writeWebSocket(ctx context.Context, connection *websocket.Conn, envelope wsEnvelope) error {

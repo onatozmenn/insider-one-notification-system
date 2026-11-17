@@ -11,7 +11,7 @@ The MVP is a modular monolith with PostgreSQL as the source of truth and Redis f
 ## Decision
 
 - **Templates** live in the notification domain (`internal/notification/template.go`) and in a `templates` table added by migration `000002`. Rendering happens in the API before validation, so the worker only ever sees a normal notification row. There is no template reference on the notification, which keeps the delivery path unchanged.
-- **WebSocket updates** use Redis pub/sub channel `notification.events`. The worker publishes after each delivery transition; the API hub keeps in-memory subscribers and filters by notification ID. Frames are best-effort with no replay buffer. A client that misses a frame re-reads the notification over HTTP. This keeps the API stateless and lets any replica serve a connection.
+- **WebSocket updates** use Redis pub/sub channel `notification.events`. The worker publishes after each delivery transition; the API hub keeps in-memory subscribers and filters by notification ID. A 2-second database poll backs up the subscription when pub/sub is unavailable or a transition is missed. Frames are best-effort with no replay buffer. A client that misses a frame re-reads the notification over HTTP. This keeps the API stateless and lets any replica serve a connection.
 - **Distributed tracing** uses OpenTelemetry with OTLP HTTP. The API starts a server span, the enqueue step injects `traceparent` into the asynq payload, the worker extracts it, and the provider client injects it into the outgoing request headers. Tracing is enabled only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Jaeger is an optional Compose profile, not a dependency.
 - **Dead-letter retry** resets a `failed` or `dead_letter` row and enqueues a fresh task with a new task ID. The original asynq archive entry is left untouched. The database status guard remains the final authority.
 - **Load testing** is a standalone k6 script against the public API. It is not part of CI, because it needs a running stack and a provider endpoint.
@@ -28,7 +28,7 @@ Positive:
 
 Negative:
 
-- WebSocket events are lost if no API replica is subscribed or the client disconnects. This is documented as best-effort.
+- WebSocket events can still be missed while the client is disconnected. The 2-second poll recovers transitions while connected, but there is no replay buffer.
 - Tracing adds a dependency tree to the binary even when disabled (it is a no-op exporter).
 - Template changes are not versioned; a notification stores the rendered output, so history is preserved but templates cannot be re-rendered later.
 - The Grafana dashboard is a demo view, not a production SLO dashboard.
