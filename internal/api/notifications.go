@@ -201,6 +201,7 @@ func (h *notificationHandler) cancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.metrics.IncStatus(string(n.Channel), string(n.Status))
 	writeJSON(w, http.StatusOK, n)
 }
 
@@ -217,6 +218,7 @@ func (h *notificationHandler) retry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.metrics.IncStatus(string(n.Channel), string(n.Status))
 	w.Header().Set("Location", "/api/v1/notifications/"+n.ID.String())
 	writeJSON(w, http.StatusAccepted, n)
 }

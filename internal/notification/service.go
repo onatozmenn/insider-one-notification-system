@@ -79,6 +79,40 @@ func (s *Service) WithLogger(logger *slog.Logger) *Service {
 	return s
 }
 
+// resolveTemplate renders a template reference into subject and content.
+func (s *Service) resolveTemplate(ctx context.Context, input CreateInput) (CreateInput, error) {
+	if input.Template == "" {
+		return input, nil
+	}
+
+	template, err := s.store.GetTemplateByName(ctx, input.Template)
+	if errors.Is(err, ErrTemplateNotFound) {
+		return CreateInput{}, ErrTemplateNotFound
+	}
+	if err != nil {
+		return CreateInput{}, err
+	}
+
+	channel := Channel(strings.ToLower(strings.TrimSpace(string(input.Channel))))
+	if channel != template.Channel {
+		return CreateInput{}, &ValidationError{Details: []FieldError{{
+			Field:  "channel",
+			Reason: "must match the template channel",
+		}}}
+	}
+
+	rendered, err := RenderTemplate(*template, input.Variables)
+	if err != nil {
+		return CreateInput{}, err
+	}
+
+	input.Subject = rendered.Subject
+	input.Content = rendered.Content
+	input.Template = ""
+	input.Variables = nil
+	return input, nil
+}
+
 // Create validates and persists one notification.
 // The boolean result reports an idempotent replay.
 func (s *Service) Create(
@@ -89,24 +123,9 @@ func (s *Service) Create(
 ) (*Notification, bool, error) {
 	now := s.now().UTC()
 
-	if input.Template != "" {
-		template, err := s.store.GetTemplateByName(ctx, input.Template)
-		if errors.Is(err, ErrTemplateNotFound) {
-			return nil, false, ErrTemplateNotFound
-		}
-		if err != nil {
-			return nil, false, err
-		}
-
-		rendered, err := RenderTemplate(*template, input.Variables)
-		if err != nil {
-			return nil, false, err
-		}
-
-		input.Subject = rendered.Subject
-		input.Content = rendered.Content
-		input.Template = ""
-		input.Variables = nil
+	input, err := s.resolveTemplate(ctx, input)
+	if err != nil {
+		return nil, false, err
 	}
 
 	validated, err := ValidateCreate(input, now)
@@ -190,7 +209,43 @@ func (s *Service) CreateBatch(
 ) (*Batch, bool, error) {
 	now := s.now().UTC()
 
-	validated, err := ValidateBatch(input, now)
+	if err := validateBatchSize(len(input.Notifications)); err != nil {
+		return nil, false, err
+	}
+
+	// Render every template before validation so a template-only item passes
+	// channel validation and the batch is still all-or-nothing.
+	resolved := make([]CreateInput, len(input.Notifications))
+	var errs []FieldError
+	for i, item := range input.Notifications {
+		value, err := s.resolveTemplate(ctx, item)
+		if err != nil {
+			var validationErr *ValidationError
+			switch {
+			case errors.Is(err, ErrTemplateNotFound):
+				errs = append(errs, FieldError{
+					Field:  fmt.Sprintf("notifications[%d].template", i),
+					Reason: "does not exist",
+				})
+			case errors.As(err, &validationErr):
+				for _, detail := range validationErr.Details {
+					errs = append(errs, FieldError{
+						Field:  fmt.Sprintf("notifications[%d].%s", i, detail.Field),
+						Reason: detail.Reason,
+					})
+				}
+			default:
+				return nil, false, err
+			}
+			continue
+		}
+		resolved[i] = value
+	}
+	if len(errs) > 0 {
+		return nil, false, &ValidationError{Details: errs}
+	}
+
+	validated, err := ValidateBatch(BatchInput{Notifications: resolved}, now)
 	if err != nil {
 		return nil, false, err
 	}

@@ -49,7 +49,8 @@ func TestHubUnsubscribe(t *testing.T) {
 	hub := NewHub()
 	_, unsubscribe := hub.Subscribe("notification-1")
 	unsubscribe()
+	unsubscribe() // must be idempotent
 
 	hub.Broadcast(StatusEvent{NotificationID: "notification-1", Status: "accepted"})
-	require.True(t, true)
+	require.Empty(t, hub.subscribers["notification-1"])
 }

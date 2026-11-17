@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -95,31 +96,17 @@ func ValidateTemplate(input TemplateInput) (TemplateInput, error) {
 	return input, nil
 }
 
-// RenderTemplate replaces {{variable}} placeholders.
+// RenderTemplate replaces {{variable}} placeholders and bounds the output to
+// the channel limits before allocating the full result.
 func RenderTemplate(template Template, variables map[string]string) (RenderedTemplate, error) {
 	missing := make(map[string]struct{})
 
-	render := func(text string) string {
-		return placeholderPattern.ReplaceAllStringFunc(text, func(match string) string {
-			parts := placeholderPattern.FindStringSubmatch(match)
-			if len(parts) < 2 {
-				return match
-			}
-			name := parts[1]
-			value, ok := variables[name]
-			if !ok {
-				missing[name] = struct{}{}
-				return match
-			}
-			return value
-		})
-	}
-
 	subject := ""
+	subjectTooLong := false
 	if template.Subject != nil {
-		subject = render(*template.Subject)
+		subject, subjectTooLong = renderTemplateText(*template.Subject, variables, templateSubjectLimit(template.Channel), missing)
 	}
-	content := render(template.Content)
+	content, contentTooLong := renderTemplateText(template.Content, variables, templateContentLimit(template.Channel), missing)
 
 	if len(missing) > 0 {
 		names := make([]string, 0, len(missing))
@@ -138,5 +125,72 @@ func RenderTemplate(template Template, variables map[string]string) (RenderedTem
 		return RenderedTemplate{}, &ValidationError{Details: details}
 	}
 
+	var details []FieldError
+	if subjectTooLong {
+		details = append(details, FieldError{Field: "subject", Reason: "rendered subject exceeds the channel limit"})
+	}
+	if contentTooLong {
+		details = append(details, FieldError{Field: "content", Reason: "rendered content exceeds the channel limit"})
+	}
+	if len(details) > 0 {
+		return RenderedTemplate{}, &ValidationError{Details: details}
+	}
+
 	return RenderedTemplate{Subject: subject, Content: content}, nil
+}
+
+func renderTemplateText(text string, variables map[string]string, limit int, missing map[string]struct{}) (string, bool) {
+	var builder strings.Builder
+	size := 0
+	last := 0
+
+	write := func(value string) bool {
+		count := utf8.RuneCountInString(value)
+		if size+count > limit {
+			return false
+		}
+		builder.WriteString(value)
+		size += count
+		return true
+	}
+
+	for _, location := range placeholderPattern.FindAllStringSubmatchIndex(text, -1) {
+		if !write(text[last:location[0]]) {
+			return "", true
+		}
+
+		name := text[location[2]:location[3]]
+		value, ok := variables[name]
+		if !ok {
+			missing[name] = struct{}{}
+			value = text[location[0]:location[1]]
+		}
+		if !write(value) {
+			return "", true
+		}
+		last = location[1]
+	}
+
+	if !write(text[last:]) {
+		return "", true
+	}
+	return builder.String(), false
+}
+
+func templateContentLimit(channel Channel) int {
+	switch channel {
+	case ChannelSMS:
+		return maxSMSContent
+	case ChannelEmail:
+		return maxEmailContent
+	default:
+		return maxPushContent
+	}
+}
+
+func templateSubjectLimit(channel Channel) int {
+	if channel == ChannelPush {
+		return maxPushSubject
+	}
+	return maxEmailSubject
 }

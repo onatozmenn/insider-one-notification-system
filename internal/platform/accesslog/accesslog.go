@@ -45,6 +45,9 @@ func (w *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // Flush keeps streaming responses working through the logging wrapper.
 func (w *responseWriter) Flush() {
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		if w.status == 0 {
+			w.status = http.StatusOK
+		}
 		flusher.Flush()
 	}
 }

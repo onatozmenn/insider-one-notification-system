@@ -299,6 +299,27 @@ func TestServiceCreateTemplateMissingVariable(t *testing.T) {
 	assert.Contains(t, fieldNames(validationErr), "variables.name")
 }
 
+func TestServiceCreateTemplateChannelMismatch(t *testing.T) {
+	store := &fakeStore{
+		getTemplateByNameFn: func(context.Context, string) (*Template, error) {
+			return &Template{Name: "welcome", Channel: ChannelSMS, Content: "Hello {{name}}"}, nil
+		},
+	}
+	service := NewService(store, 5, fixedNow)
+
+	_, _, err := service.Create(context.Background(), CreateInput{
+		Recipient: "device-token",
+		Channel:   ChannelPush,
+		Template:  "welcome",
+		Variables: map[string]string{"name": "Onat"},
+	}, "", "req-1")
+
+	require.Error(t, err)
+	var validationErr *ValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Contains(t, fieldNames(validationErr), "channel")
+}
+
 func TestServiceRetry(t *testing.T) {
 	id := uuid.New()
 	store := &fakeStore{
@@ -309,7 +330,14 @@ func TestServiceRetry(t *testing.T) {
 			return &Notification{ID: id, Status: StatusQueued}, nil
 		},
 	}
-	enqueuer := &fakeEnqueuer{}
+	enqueuer := &fakeEnqueuer{
+		enqueueRetryFn: func(_ context.Context, gotID uuid.UUID, priority Priority, correlationID string) error {
+			assert.Equal(t, id, gotID)
+			assert.Equal(t, PriorityHigh, priority)
+			assert.Equal(t, "req-1", correlationID)
+			return nil
+		},
+	}
 	service := NewService(store, 5, fixedNow).WithEnqueuer(enqueuer)
 
 	n, err := service.Retry(context.Background(), id)
@@ -412,6 +440,60 @@ func TestServiceCreateRejectsInvalidInput(t *testing.T) {
 
 	var validationErr *ValidationError
 	assert.True(t, errors.As(err, &validationErr))
+}
+
+func TestServiceCreateBatchWithTemplate(t *testing.T) {
+	var captured []*Notification
+
+	store := &fakeStore{
+		getTemplateByNameFn: func(context.Context, string) (*Template, error) {
+			return &Template{Name: "welcome", Channel: ChannelSMS, Content: "Hello {{name}}"}, nil
+		},
+		createBatchFn: func(_ context.Context, batch *Batch, items []*Notification, _ *IdempotencyRecord) (*Batch, error) {
+			captured = items
+			return batch, nil
+		},
+	}
+	service := NewService(store, 5, fixedNow)
+
+	batch, _, err := service.CreateBatch(context.Background(), BatchInput{
+		Notifications: []CreateInput{{
+			Recipient: "+15555550100",
+			Channel:   ChannelSMS,
+			Template:  "welcome",
+			Variables: map[string]string{"name": "Onat"},
+		}},
+	}, "", "req-1")
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, batch.Total)
+	require.Len(t, captured, 1)
+	assert.Equal(t, "Hello Onat", captured[0].Content)
+}
+
+func TestServiceCreateBatchTemplateErrorIsIndexed(t *testing.T) {
+	store := &fakeStore{
+		getTemplateByNameFn: func(context.Context, string) (*Template, error) {
+			return nil, ErrTemplateNotFound
+		},
+	}
+	service := NewService(store, 5, fixedNow)
+
+	_, _, err := service.CreateBatch(context.Background(), BatchInput{
+		Notifications: []CreateInput{
+			validSMS(),
+			{
+				Recipient: "+15555550100",
+				Channel:   ChannelSMS,
+				Template:  "missing",
+			},
+		},
+	}, "", "req-1")
+
+	require.Error(t, err)
+	var validationErr *ValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "notifications[1].template", validationErr.Details[0].Field)
 }
 
 func TestServiceCreateBatch(t *testing.T) {

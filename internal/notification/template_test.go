@@ -100,6 +100,31 @@ func TestRenderTemplate(t *testing.T) {
 	assert.Equal(t, "Hi Onat, your code is ABC.", rendered.Content)
 }
 
+func TestRenderTemplateRepeatsPlaceholder(t *testing.T) {
+	template := Template{
+		Channel: ChannelSMS,
+		Content: "{{name}}, hello {{name}}",
+	}
+
+	rendered, err := RenderTemplate(template, map[string]string{"name": "Onat"})
+	require.NoError(t, err)
+	assert.Equal(t, "Onat, hello Onat", rendered.Content)
+}
+
+func TestRenderTemplateRejectsTooLongOutput(t *testing.T) {
+	template := Template{
+		Channel: ChannelSMS,
+		Content: "{{body}}",
+	}
+
+	_, err := RenderTemplate(template, map[string]string{"body": strings.Repeat("a", maxSMSContent+1)})
+	require.Error(t, err)
+
+	var validationErr *ValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Contains(t, fieldNames(validationErr), "content")
+}
+
 func TestRenderTemplateMissingVariable(t *testing.T) {
 	template := Template{
 		Channel: ChannelSMS,

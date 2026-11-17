@@ -68,6 +68,7 @@ func endpointURL(endpoint string) (*url.URL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse OTLP endpoint: %w", err)
 	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	if parsed.Path == "" || parsed.Path == "/" {
 		parsed.Path = "/v1/traces"
 	}

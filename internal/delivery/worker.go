@@ -133,7 +133,7 @@ func (w *Worker) Start(ctx context.Context) error {
 	return nil
 }
 
-func (w *Worker) handle(ctx context.Context, task *asynq.Task) error {
+func (w *Worker) handle(ctx context.Context, task *asynq.Task) (handleErr error) {
 	var payload TaskPayload
 	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
 		return fmt.Errorf("decode task payload: %w", err)
@@ -157,7 +157,16 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) error {
 			attribute.String("notification.id", id.String()),
 		),
 	)
-	defer span.End()
+	defer func() {
+		if handleErr != nil {
+			var retryAfter *RetryAfterError
+			if !errors.As(handleErr, &retryAfter) {
+				span.RecordError(handleErr)
+				span.SetStatus(codes.Error, handleErr.Error())
+			}
+		}
+		span.End()
+	}()
 
 	n, err := w.repository.Get(ctx, id)
 	if errors.Is(err, notification.ErrNotFound) {
@@ -182,10 +191,23 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) error {
 	}
 
 	waitStarted := time.Now()
-	if err := w.waitForToken(ctx, n.Channel); err != nil {
-		return err
-	}
+	waitCtx, waitSpan := otel.Tracer("worker").Start(ctx, "rate_limit.wait",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String("notification.channel", string(n.Channel)),
+		),
+	)
+	waitErr := w.waitForToken(waitCtx, n.Channel)
 	rateLimitWait := time.Since(waitStarted)
+	waitSpan.SetAttributes(attribute.Int64("rate_limit.wait_ms", rateLimitWait.Milliseconds()))
+	if waitErr != nil {
+		waitSpan.RecordError(waitErr)
+		waitSpan.SetStatus(codes.Error, waitErr.Error())
+	}
+	waitSpan.End()
+	if waitErr != nil {
+		return waitErr
+	}
 
 	claimed, err := w.repository.Claim(ctx, id, time.Now().UTC(), w.lease)
 	if errors.Is(err, notification.ErrNotClaimable) || errors.Is(err, notification.ErrNotFound) {

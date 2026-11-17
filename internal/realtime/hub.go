@@ -35,7 +35,7 @@ func NewHub() *Hub {
 
 // Subscribe returns a channel and a cancel function.
 func (h *Hub) Subscribe(notificationID string) (<-chan StatusEvent, func()) {
-	events := make(chan StatusEvent, 16)
+	events := make(chan StatusEvent, 64)
 
 	h.mu.Lock()
 	if h.subscribers[notificationID] == nil {
@@ -44,17 +44,20 @@ func (h *Hub) Subscribe(notificationID string) (<-chan StatusEvent, func()) {
 	h.subscribers[notificationID][events] = struct{}{}
 	h.mu.Unlock()
 
+	var once sync.Once
 	cancel := func() {
-		h.mu.Lock()
-		defer h.mu.Unlock()
+		once.Do(func() {
+			h.mu.Lock()
+			defer h.mu.Unlock()
 
-		if subscribers, ok := h.subscribers[notificationID]; ok {
-			delete(subscribers, events)
-			if len(subscribers) == 0 {
-				delete(h.subscribers, notificationID)
+			if subscribers, ok := h.subscribers[notificationID]; ok {
+				delete(subscribers, events)
+				if len(subscribers) == 0 {
+					delete(h.subscribers, notificationID)
+				}
 			}
-		}
-		close(events)
+			close(events)
+		})
 	}
 
 	return events, cancel

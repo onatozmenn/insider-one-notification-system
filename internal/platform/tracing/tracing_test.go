@@ -36,6 +36,11 @@ func TestEndpointURLAddsDefaultPath(t *testing.T) {
 			endpoint: "https://collector.example.com/otlp/v1/traces",
 			want:     "https://collector.example.com/otlp/v1/traces",
 		},
+		{
+			name:     "uppercase scheme",
+			endpoint: "HTTP://jaeger:4318",
+			want:     "http://jaeger:4318/v1/traces",
+		},
 	}
 
 	for _, tt := range tests {

@@ -380,7 +380,8 @@ func TestListTemplates(t *testing.T) {
 
 func TestGetTemplate(t *testing.T) {
 	service := &fakeNotificationService{
-		getTemplateFn: func(context.Context, uuid.UUID) (*notification.Template, error) {
+		getTemplateFn: func(_ context.Context, id uuid.UUID) (*notification.Template, error) {
+			require.Equal(t, testNotificationID, id)
 			return &notification.Template{ID: testNotificationID, Name: "welcome", Channel: notification.ChannelSMS, Content: "Hello"}, nil
 		},
 	}

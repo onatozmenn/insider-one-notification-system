@@ -95,6 +95,8 @@ func (q *Queue) Enqueue(
 }
 
 // EnqueueRetry submits a failed or dead-letter notification with a fresh task ID.
+// Uniqueness is disabled: asynq deduplicates on task type and payload, so a
+// quick retry would otherwise collide with the previous attempt.
 func (q *Queue) EnqueueRetry(
 	ctx context.Context,
 	id uuid.UUID,
@@ -102,7 +104,7 @@ func (q *Queue) EnqueueRetry(
 	correlationID string,
 ) error {
 	taskID := fmt.Sprintf("%s:retry:%d", id, time.Now().UnixNano())
-	return q.enqueue(ctx, taskID, id, priority, correlationID, nil, time.Minute)
+	return q.enqueue(ctx, taskID, id, priority, correlationID, nil, 0)
 }
 
 func (q *Queue) enqueue(

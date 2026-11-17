@@ -18,12 +18,14 @@ import (
 )
 
 func TestWebSocketSnapshotAndStatus(t *testing.T) {
+	snapshotTime := time.Now().UTC()
 	service := &fakeNotificationService{
 		getFn: func(_ context.Context, id uuid.UUID) (*notification.Notification, error) {
 			return &notification.Notification{
-				ID:      id,
-				Channel: notification.ChannelSMS,
-				Status:  notification.StatusQueued,
+				ID:        id,
+				Channel:   notification.ChannelSMS,
+				Status:    notification.StatusQueued,
+				UpdatedAt: snapshotTime,
 			}, nil
 		},
 	}
@@ -67,6 +69,7 @@ func TestWebSocketSnapshotAndStatus(t *testing.T) {
 		Channel:        "sms",
 		Status:         "accepted",
 		AttemptCount:   1,
+		UpdatedAt:      snapshotTime.Add(time.Second),
 	})
 
 	_, payload, err = connection.Read(ctx)

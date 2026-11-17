@@ -41,6 +41,11 @@ func registerWebSocketRoute(
 			return
 		}
 
+		// Subscribe before reading the snapshot so a transition between the
+		// read and the subscription is not lost.
+		events, unsubscribe := hub.Subscribe(id.String())
+		defer unsubscribe()
+
 		snapshot, err := service.Get(r.Context(), id)
 		if err != nil {
 			if errors.Is(err, notification.ErrNotFound) {
@@ -64,25 +69,29 @@ func registerWebSocketRoute(
 			_ = connection.Close(websocket.StatusNormalClosure, "closed")
 		}()
 
-		if err := writeWebSocket(r.Context(), connection, wsEnvelope{
+		// The client is not expected to send frames; CloseRead detects a peer
+		// close and returns a context that is canceled with the connection.
+		ctx := connection.CloseRead(r.Context())
+
+		if err := writeWebSocket(ctx, connection, wsEnvelope{
 			Type:         "snapshot",
 			Notification: snapshot,
 		}); err != nil {
 			return
 		}
 
-		events, unsubscribe := hub.Subscribe(snapshot.ID.String())
-		defer unsubscribe()
-
 		for {
 			select {
-			case <-r.Context().Done():
+			case <-ctx.Done():
 				return
 			case event, ok := <-events:
 				if !ok {
 					return
 				}
-				if err := writeWebSocket(r.Context(), connection, wsEnvelope{
+				if !event.UpdatedAt.After(snapshot.UpdatedAt) {
+					continue
+				}
+				if err := writeWebSocket(ctx, connection, wsEnvelope{
 					Type:  "status",
 					Event: &event,
 				}); err != nil {

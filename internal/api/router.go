@@ -43,7 +43,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	r.Use(tracing.Middleware)
 	r.Use(accesslog.Middleware(deps.Logger, deps.Metrics))
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(30 * time.Second))
+	r.Use(requestTimeout(30 * time.Second))
 
 	r.Get("/", info)
 	r.Get("/healthz", healthz)
@@ -59,6 +59,23 @@ func NewRouter(deps Dependencies) http.Handler {
 	}
 
 	return r
+}
+
+// requestTimeout applies the HTTP request deadline to normal routes but leaves
+// WebSocket connections open; their lifetime is controlled by the upgrade.
+func requestTimeout(d time.Duration) func(http.Handler) http.Handler {
+	timeout := middleware.Timeout(d)
+
+	return func(next http.Handler) http.Handler {
+		timed := timeout(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/ws" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			timed.ServeHTTP(w, r)
+		})
+	}
 }
 
 func info(w http.ResponseWriter, _ *http.Request) {

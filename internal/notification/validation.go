@@ -117,11 +117,8 @@ func ValidateCreate(input CreateInput, now time.Time) (CreateInput, error) {
 
 // ValidateBatch validates every item and reports indexed field errors.
 func ValidateBatch(input BatchInput, now time.Time) ([]CreateInput, error) {
-	if len(input.Notifications) == 0 {
-		return nil, &ValidationError{Details: []FieldError{{Field: "notifications", Reason: "must contain at least one item"}}}
-	}
-	if len(input.Notifications) > MaxBatchSize {
-		return nil, &ValidationError{Details: []FieldError{{Field: "notifications", Reason: fmt.Sprintf("must contain at most %d items", MaxBatchSize)}}}
+	if err := validateBatchSize(len(input.Notifications)); err != nil {
+		return nil, err
 	}
 
 	validated := make([]CreateInput, 0, len(input.Notifications))
@@ -150,4 +147,14 @@ func ValidateBatch(input BatchInput, now time.Time) ([]CreateInput, error) {
 	}
 
 	return validated, nil
+}
+
+func validateBatchSize(count int) error {
+	if count == 0 {
+		return &ValidationError{Details: []FieldError{{Field: "notifications", Reason: "must contain at least one item"}}}
+	}
+	if count > MaxBatchSize {
+		return &ValidationError{Details: []FieldError{{Field: "notifications", Reason: fmt.Sprintf("must contain at most %d items", MaxBatchSize)}}}
+	}
+	return nil
 }
