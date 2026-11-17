@@ -46,7 +46,7 @@ docker compose --profile tracing up
 | --- | --- | --- |
 | `gateway` | `8080` (`GATEWAY_PORT`) | nginx. Single entry point. |
 | `api` | `8081` (`API_PORT`) | Direct API access for debugging. |
-| `swagger-ui` | internal | Reached through `/docs`. |
+| `swagger-ui` | internal | OpenAPI UI, reached through `/docs`; spec at `/openapi.yaml`. |
 | `postgres` | internal | Not exposed by default. |
 | `redis` | internal | Not exposed by default. |
 | `migrate` | none | Runs once and exits. |

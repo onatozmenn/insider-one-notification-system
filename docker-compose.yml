@@ -102,6 +102,15 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  swagger-ui:
+    image: swaggerapi/swagger-ui:v5.17.14
+    environment:
+      SWAGGER_JSON: /openapi.yaml
+      BASE_URL: /docs
+    volumes:
+      - ./api/openapi.yaml:/openapi.yaml:ro
+    restart: unless-stopped
+
   gateway:
     image: nginx:1.27-alpine
     ports:
@@ -111,6 +120,8 @@ services:
     depends_on:
       api:
         condition: service_healthy
+      swagger-ui:
+        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
       interval: 5s
