@@ -180,10 +180,10 @@ Events power the status timeline and the WebSocket feed. They are written in the
 | `scope` | `text` | Endpoint scope, for example `POST:/api/v1/notifications`. |
 | `key` | `text` | Client-provided `Idempotency-Key`. |
 | `request_hash` | `text` | SHA-256 of the canonical request body. |
-| `state` | `text` | `in_progress` or `completed`. |
+| `state` | `text` | `completed` in the MVP; `in_progress` is reserved for future multi-step creates. |
 | `resource_id` | `uuid` | Nullable. The notification or batch created by the request. |
 | `response_status` | `int` | Stored response status. |
-| `response_body` | `jsonb` | Stored response body. |
+| `response_body` | `jsonb` | Reserved; the MVP replays through `resource_id`. |
 | `created_at` | `timestamptz` | Default `now()`. |
 | `expires_at` | `timestamptz` | Default `now() + interval '24 hours'`. |
 
@@ -192,13 +192,11 @@ Primary key: `(scope, key)`.
 ### Create transaction
 
 1. Begin a transaction.
-2. Insert the idempotency row as `in_progress` with `resource_id`.
-3. Insert the notification and its first event.
+2. Insert the notification and its first event.
+3. Insert the idempotency row as `completed` with `resource_id` and `response_status`.
 4. Commit.
-5. Enqueue the task and move the notification to `queued`.
-6. Update the idempotency row to `completed` with the response.
 
-If the process dies before step 4, the transaction rolls back and a retry starts cleanly. If it dies between 4 and 6, an `in_progress` row remains. A retry after 60 seconds reclaims it, reads `resource_id`, returns the current notification, and marks the key completed. If the enqueue fails, the notification stays `pending` and the reconciler recovers it.
+If the transaction fails, nothing is committed and a retry starts cleanly. A concurrent request with the same key gets a unique violation, reads the completed row, and replays the resource. The `in_progress` state is reserved for a future multi-step create. Enqueue happens after commit; if it fails, the notification stays `pending` and the reconciler recovers it.
 
 ### `templates` (bonus)
 

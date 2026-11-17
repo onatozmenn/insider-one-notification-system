@@ -18,9 +18,10 @@ Use at-least-once delivery and make duplicates unlikely and harmless:
 
 - Optional `Idempotency-Key` header on create endpoints.
 - Store `(scope, key)` with a SHA-256 hash of the canonical request body.
-- Same key and same body: replay the stored response with `Idempotent-Replayed: true`.
+- Same key and same body: replay the original resource with `Idempotent-Replayed: true`.
 - Same key and different body: `422 idempotency_conflict`.
-- Request still running: `409 idempotency_in_progress`.
+- The resource and the completed idempotency row commit in one transaction.
+- Request still running: `409 idempotency_in_progress`, reserved for future multi-step creates.
 - Keys expire after 24 hours.
 
 ### Worker layer
