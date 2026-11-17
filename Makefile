@@ -37,7 +37,7 @@ migrate-version:
 	docker compose run --rm --entrypoint /app/migrate migrate version
 
 openapi-lint:
-	@echo "OpenAPI lint lands with M1-7"
+	npx --yes @redocly/cli@latest lint api/openapi.yaml
 
 smoke:
 	@echo "Smoke test lands with M5-3"
