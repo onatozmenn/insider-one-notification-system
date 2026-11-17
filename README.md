@@ -59,6 +59,8 @@ cp .env.example .env
 docker compose up --build
 ```
 
+If port `8080` is already in use, set `GATEWAY_PORT=8090` in `.env` and replace `8080` with `8090` below.
+
 The stack exposes:
 
 | URL | What |
