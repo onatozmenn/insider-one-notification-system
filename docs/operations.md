@@ -16,7 +16,9 @@ cd insider-one-notification-system
 docker compose up --build
 ```
 
-The first build takes a few minutes. When the stack is healthy:
+The first build takes a few minutes. If port `8080` is already in use, set `GATEWAY_PORT=8090` in `.env` and use `http://localhost:8090` below.
+
+When the stack is healthy:
 
 | URL | What |
 | --- | --- |
@@ -43,8 +45,8 @@ docker compose --profile tracing up
 
 | Service | Port | Notes |
 | --- | --- | --- |
-| `gateway` | `8080` | nginx. Single entry point. |
-| `api` | `8081` | Direct API access for debugging. |
+| `gateway` | `8080` (`GATEWAY_PORT`) | nginx. Single entry point. |
+| `api` | `8081` (`API_PORT`) | Direct API access for debugging. |
 | `swagger-ui` | internal | Reached through `/docs`. |
 | `postgres` | internal | Not exposed by default. |
 | `redis` | internal | Not exposed by default. |
