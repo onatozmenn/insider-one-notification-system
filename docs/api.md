@@ -94,6 +94,8 @@ Content-Type: application/json
 
 If Redis is unavailable, the notification is persisted as `pending` and the response is still `202`. The reconciler enqueues it when Redis returns. Use an `Idempotency-Key` if the client may retry.
 
+> In the M1 slice, the row is returned as `pending`. M2 adds the enqueue step and returns `queued`.
+
 ```json
 {
   "id": "0193b2f4-7c1a-7d3e-9a10-5f8c2d6e4b71",
@@ -148,6 +150,8 @@ Rules:
 - `notifications` contains 1 to 1000 items.
 - Validation is all-or-nothing. If one item is invalid, nothing is inserted.
 - Item errors use the array index in the `field` value.
+
+> In the M1 slice, the batch is returned as `pending`. M2 enqueues the items and the status becomes `processing`.
 
 Response:
 
@@ -316,13 +320,12 @@ The numbers come from the database for the last five minutes and from asynq Insp
 - The key is scoped by endpoint. The same key on a different endpoint is a different request.
 - The server stores a SHA-256 hash of the canonical JSON body.
 - Same key and same hash:
-  - If the original request completed, the stored response is returned with `Idempotent-Replayed: true`.
-  - If it is still running, the server returns `409 idempotency_in_progress`.
+  - If the original request completed, the resource is re-read and returned with `Idempotent-Replayed: true`.
+  - If it is still running, the server returns `409 idempotency_in_progress`. The MVP commits the resource and the idempotency row together, so this state is reserved for future multi-step creates.
 - Same key and a different hash: `422 idempotency_conflict`.
 - Keys expire after 24 hours.
-- The API writes the idempotency row and the notification in one transaction. The idempotency row stores `resource_id`.
-- After commit, the API enqueues the task and updates the key to `completed` with the response.
-- An `in_progress` row older than 60 seconds is abandoned. A retry with the same key reclaims it, reads `resource_id`, returns the current resource, and marks the key completed. For `POST /notifications` the shape is the notification object; for `POST /notifications/batch` it is the batch summary (`batch_id`, `total`, `status`, `status_url`).
+- The notification (or batch) and the completed idempotency row commit in one transaction. The row stores `resource_id`.
+- If the transaction fails, nothing is committed and a retry starts cleanly. A concurrent request with the same key gets a unique violation, reads the completed row, and replays the resource.
 - Without a key, two requests create two distinct notifications with different IDs. The worker guard only prevents repeated work for the same notification ID; it cannot deduplicate separate notifications.
 
 ## 12. OpenAPI and Swagger

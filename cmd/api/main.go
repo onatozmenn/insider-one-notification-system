@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/onatozmenn/insider-one-notification-system/internal/api"
+	"github.com/onatozmenn/insider-one-notification-system/internal/notification"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/config"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/logger"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/postgres"
@@ -47,6 +48,9 @@ func run() error {
 	}
 	defer func() { _ = rdb.Close() }()
 
+	store := notification.NewRepository(db)
+	notifications := notification.NewService(store, cfg.MaxAttempts, time.Now)
+
 	router := api.NewRouter(api.Dependencies{
 		Logger: log,
 		Readiness: api.ReadinessChecks{
@@ -55,6 +59,7 @@ func run() error {
 				return rdb.Ping(ctx).Err()
 			},
 		},
+		Notifications: notifications,
 	})
 
 	server := &http.Server{

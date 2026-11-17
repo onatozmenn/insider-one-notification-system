@@ -134,7 +134,7 @@ Two layers:
 - Optional `Idempotency-Key` header.
 - Row in `idempotency_keys` with scope, key, request hash, state, response.
 - In-progress requests return `409`.
-- Completed requests replay the stored response with `Idempotent-Replayed: true`.
+- Completed requests replay the original resource with `Idempotent-Replayed: true`.
 - Different body with the same key returns `422`.
 
 ### Worker layer

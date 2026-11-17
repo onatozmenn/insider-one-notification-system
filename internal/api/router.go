@@ -24,8 +24,9 @@ type ReadinessChecks struct {
 
 // Dependencies are the collaborators required by the router.
 type Dependencies struct {
-	Logger    *slog.Logger
-	Readiness ReadinessChecks
+	Logger        *slog.Logger
+	Readiness     ReadinessChecks
+	Notifications NotificationService
 }
 
 // NewRouter builds the HTTP router. Feature routes are added as their
@@ -40,6 +41,10 @@ func NewRouter(deps Dependencies) http.Handler {
 	r.Get("/", info)
 	r.Get("/healthz", healthz)
 	r.Get("/readyz", readyz(deps.Readiness, deps.Logger))
+
+	if deps.Notifications != nil {
+		registerNotificationRoutes(r, deps.Notifications, deps.Logger)
+	}
 
 	return r
 }

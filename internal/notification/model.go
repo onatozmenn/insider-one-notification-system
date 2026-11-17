@@ -93,6 +93,36 @@ func (s Status) Cancellable() bool {
 	return s == StatusPending || s == StatusScheduled
 }
 
+// DeriveBatchStatus applies the batch precedence rules.
+func DeriveBatchStatus(counts map[Status]int, total int) BatchStatus {
+	if total <= 0 {
+		return BatchStatusPending
+	}
+	if counts[StatusQueued]+counts[StatusProcessing] > 0 {
+		return BatchStatusProcessing
+	}
+	if counts[StatusPending]+counts[StatusScheduled] > 0 {
+		return BatchStatusPending
+	}
+
+	accepted := counts[StatusAccepted] + counts[StatusDelivered]
+	failed := counts[StatusFailed] + counts[StatusDeadLetter]
+	cancelled := counts[StatusCancelled]
+
+	switch {
+	case accepted == total:
+		return BatchStatusCompleted
+	case failed == total:
+		return BatchStatusFailed
+	case cancelled == total:
+		return BatchStatusCancelled
+	case accepted > 0 && failed > 0:
+		return BatchStatusPartialFailure
+	default:
+		return BatchStatusMixed
+	}
+}
+
 // BatchStatus is the derived state of a batch.
 type BatchStatus string
 

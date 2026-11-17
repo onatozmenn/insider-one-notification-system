@@ -240,7 +240,7 @@ docker compose logs -f api | jq .
 
 - `GET /healthz`: process is alive.
 - `GET /readyz`: PostgreSQL and Redis respond.
-- Docker healthchecks mark a container unhealthy, but Docker alone does not remove it from an nginx upstream. The gateway uses `max_fails` and `fail_timeout` on the API upstream; in this single-instance assessment, the gateway returns `502` or `503` while the API is down. A production deployment would use a load balancer that watches readiness.
+- Docker healthchecks mark a container unhealthy, but they do not route traffic. The gateway re-resolves the API service through Docker DNS every 10 seconds, and nginx returns `502` or `503` while the API is down. A production deployment would use a load balancer that watches readiness directly.
 
 ## 12. Security notes
 
