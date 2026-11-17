@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-redis/redis_rate/v10"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 	"github.com/stretchr/testify/assert"
@@ -160,6 +161,46 @@ func TestReconcilerRecoversArchivedTask(t *testing.T) {
 	info, err = deliveryQueue.Inspector().GetTaskInfo(QueueNormal, n.ID.String())
 	require.NoError(t, err)
 	assert.NotEqual(t, asynq.TaskStateArchived, info.State)
+}
+
+func TestReconcilerRequeuesProcessingRowWithLostTask(t *testing.T) {
+	ctx := context.Background()
+	resetDeliveryState(t)
+
+	now := time.Now().UTC()
+	n := deliveryNotification()
+	n.Status = notification.StatusProcessing
+	n.AttemptCount = 1
+	n.CreatedAt = now.Add(-30 * time.Minute)
+	n.UpdatedAt = now.Add(-5 * time.Minute)
+	_, err := deliveryRepo.Create(ctx, n, []byte(`{}`), nil)
+	require.NoError(t, err)
+
+	NewReconciler(deliveryRepo, deliveryQueue, deliveryLogger).runOnce(ctx)
+
+	stored, err := deliveryRepo.Get(ctx, n.ID)
+	require.NoError(t, err)
+	assert.Equal(t, notification.StatusProcessing, stored.Status)
+	waitForQueueDepth(t, deliveryQueue, 1)
+}
+
+func TestRateLimiterIsSharedAcrossWorkerClients(t *testing.T) {
+	ctx := context.Background()
+	resetDeliveryState(t)
+
+	limiterA := redis_rate.NewLimiter(deliveryRedis.Client)
+	limiterB := redis_rate.NewLimiter(deliveryRedis.Client)
+	limit := redis_rate.Limit{Rate: 1, Period: 10 * time.Second, Burst: 1}
+	key := "ratelimit:provider:sms"
+
+	first, err := limiterA.Allow(ctx, key, limit)
+	require.NoError(t, err)
+	require.Greater(t, first.Allowed, 0)
+
+	second, err := limiterB.Allow(ctx, key, limit)
+	require.NoError(t, err)
+	assert.Zero(t, second.Allowed, "a second worker client must share the Redis limit")
+	assert.Greater(t, second.RetryAfter, time.Duration(0))
 }
 
 func waitForQueueDepth(t *testing.T, queue *Queue, want int) {

@@ -102,17 +102,16 @@ func (c *Client) Send(ctx context.Context, message Message) (Result, error) {
 		_ = response.Body.Close()
 	}()
 
-	body, readErr := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if readErr != nil {
-		return Result{}, &Error{Transient: true, Message: "read provider response", Err: readErr}
-	}
-
 	if response.StatusCode == http.StatusAccepted {
 		var result Result
-		if err := json.Unmarshal(body, &result); err != nil {
-			// The provider accepted the message; a malformed body is not a
-			// delivery failure.
-			return Result{}, nil
+		if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
+			// A 202 already means the provider accepted the message. A
+			// truncated or malformed body must not turn that into a retry,
+			// otherwise the provider receives a duplicate.
+			return Result{Status: "accepted"}, nil
+		}
+		if result.Status == "" {
+			result.Status = "accepted"
 		}
 		return result, nil
 	}

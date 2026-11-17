@@ -11,12 +11,13 @@ import (
 // Reconciler re-enqueues rows whose queue task may be missing after a crash,
 // a Redis outage, or an exhausted transport retry budget.
 type Reconciler struct {
-	repository   *notification.Repository
-	queue        *Queue
-	logger       *slog.Logger
-	interval     time.Duration
-	pendingAfter time.Duration
-	queuedAfter  time.Duration
+	repository      *notification.Repository
+	queue           *Queue
+	logger          *slog.Logger
+	interval        time.Duration
+	pendingAfter    time.Duration
+	queuedAfter     time.Duration
+	processingAfter time.Duration
 }
 
 // NewReconciler creates a reconciler with safe defaults.
@@ -25,12 +26,13 @@ func NewReconciler(repository *notification.Repository, queue *Queue, logger *sl
 		logger = slog.Default()
 	}
 	return &Reconciler{
-		repository:   repository,
-		queue:        queue,
-		logger:       logger,
-		interval:     30 * time.Second,
-		pendingAfter: time.Minute,
-		queuedAfter:  15 * time.Minute,
+		repository:      repository,
+		queue:           queue,
+		logger:          logger,
+		interval:        30 * time.Second,
+		pendingAfter:    time.Minute,
+		queuedAfter:     15 * time.Minute,
+		processingAfter: 3 * time.Minute,
 	}
 }
 
@@ -55,8 +57,9 @@ func (r *Reconciler) runOnce(ctx context.Context) {
 	now := time.Now().UTC()
 	pendingBefore := now.Add(-r.pendingAfter)
 	queuedBefore := now.Add(-r.queuedAfter)
+	processingBefore := now.Add(-r.processingAfter)
 
-	items, err := r.repository.ListReconcilable(ctx, pendingBefore, now, queuedBefore, 100)
+	items, err := r.repository.ListReconcilable(ctx, pendingBefore, now, queuedBefore, processingBefore, 100)
 	if err != nil {
 		r.logger.Warn("reconciler failed to list notifications", "error", err)
 		return

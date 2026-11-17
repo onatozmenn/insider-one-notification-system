@@ -133,6 +133,22 @@ func TestClientAcceptsMalformedBody(t *testing.T) {
 	assert.Empty(t, result.MessageID)
 }
 
+func TestClientAcceptsTruncatedBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"messageId":"partial"`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, time.Second)
+	result, err := client.Send(context.Background(), Message{ID: "1", To: "+15555550100", Channel: "sms", Content: "hello"})
+
+	require.NoError(t, err)
+	assert.Empty(t, result.MessageID)
+	assert.Equal(t, "accepted", result.Status)
+}
+
 func TestParseRetryAfterHTTPDate(t *testing.T) {
 	when := time.Now().UTC().Add(3 * time.Second).Format(http.TimeFormat)
 	delay := parseRetryAfter(when)

@@ -307,7 +307,7 @@ func (h *notificationHandler) writeError(w http.ResponseWriter, r *http.Request,
 	case errors.Is(err, notification.ErrNotFound), errors.Is(err, notification.ErrBatchNotFound), errors.Is(err, notification.ErrTemplateNotFound):
 		writeAPIError(w, http.StatusNotFound, "not_found", "Resource not found", nil)
 	case errors.Is(err, notification.ErrNotCancellable):
-		writeAPIError(w, http.StatusConflict, "not_cancellable", "Only pending or scheduled notifications can be cancelled", nil)
+		writeAPIError(w, http.StatusConflict, "not_cancellable", "Only pending, scheduled, or queued notifications can be cancelled", nil)
 	case errors.Is(err, notification.ErrNotRetryable):
 		writeAPIError(w, http.StatusConflict, "not_retryable", "Only failed or dead-letter notifications can be retried", nil)
 	case errors.Is(err, notification.ErrTemplateExists):

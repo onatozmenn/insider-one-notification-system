@@ -338,6 +338,15 @@ func TestRepositoryRetryAndCancel(t *testing.T) {
 
 	_, err = integrationRepo.Cancel(ctx, cancel.ID)
 	require.ErrorIs(t, err, ErrNotCancellable)
+
+	queued := integrationNotification()
+	queued.Status = StatusQueued
+	_, err = integrationRepo.Create(ctx, queued, []byte(`{}`), nil)
+	require.NoError(t, err)
+
+	cancelledQueued, err := integrationRepo.Cancel(ctx, queued.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCancelled, cancelledQueued.Status)
 }
 
 func TestRepositoryReconcilableRows(t *testing.T) {
@@ -379,6 +388,7 @@ func TestRepositoryReconcilableRows(t *testing.T) {
 		now.Add(-time.Minute),
 		now,
 		now.Add(-15*time.Minute),
+		now.Add(-3*time.Minute),
 		10,
 	)
 	require.NoError(t, err)
@@ -478,6 +488,40 @@ func TestRepositoryExpiredIdempotencyKey(t *testing.T) {
 	deleted, err := integrationRepo.DeleteExpiredIdempotency(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), deleted)
+}
+
+func TestRepositoryBatchOfThousand(t *testing.T) {
+	ctx := context.Background()
+	resetIntegrationDB(t)
+
+	now := time.Now().UTC()
+	batch := &Batch{
+		ID:        mustUUID(t),
+		Total:     1000,
+		Status:    BatchStatusPending,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	items := make([]*Notification, 1000)
+	for i := range items {
+		n := integrationNotification()
+		n.BatchID = &batch.ID
+		n.Recipient = fmt.Sprintf("+1555555%04d", i)
+		n.CreatedAt = now
+		n.UpdatedAt = now
+		items[i] = n
+	}
+
+	created, err := integrationRepo.CreateBatch(ctx, batch, items, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1000, created.Total)
+	assert.Equal(t, 1000, created.Counts[StatusPending])
+
+	var stored int
+	require.NoError(t, integrationPool.QueryRow(ctx,
+		`SELECT count(*) FROM notifications WHERE batch_id = $1`, batch.ID,
+	).Scan(&stored))
+	assert.Equal(t, 1000, stored)
 }
 
 func resetIntegrationDB(t *testing.T) {

@@ -365,6 +365,21 @@ func TestWorkerFinalizesStaleExhaustedLease(t *testing.T) {
 	assert.True(t, finalized)
 }
 
+func TestWorkerUsesPerChannelLimit(t *testing.T) {
+	limiter := &fakeWorkerLimiter{
+		allowFn: func(_ context.Context, key string, limit redis_rate.Limit) (*redis_rate.Result, error) {
+			assert.Equal(t, "ratelimit:provider:sms", key)
+			assert.Equal(t, 100, limit.Rate)
+			assert.Equal(t, time.Second, limit.Period)
+			assert.Equal(t, 1, limit.Burst)
+			return &redis_rate.Result{Allowed: 1}, nil
+		},
+	}
+
+	worker := testWorker(&fakeWorkerRepository{}, &fakeWorkerProvider{}, limiter)
+	require.NoError(t, worker.waitForToken(context.Background(), notification.ChannelSMS))
+}
+
 func TestWorkerWaitsForRateLimit(t *testing.T) {
 	id := uuid.New()
 	calls := 0

@@ -417,6 +417,40 @@ func TestServiceCreateIdempotentReplay(t *testing.T) {
 	assert.Equal(t, resourceID, n.ID)
 }
 
+func TestServiceScheduledReplayAfterScheduleTime(t *testing.T) {
+	originalNow := fixedNow()
+	scheduledAt := originalNow.Add(time.Hour)
+	input := validSMS()
+	input.ScheduledAt = &scheduledAt
+
+	validated, err := ValidateCreate(input, originalNow)
+	require.NoError(t, err)
+
+	resourceID := uuid.New()
+	record := &IdempotencyRecord{
+		Scope:       ScopeSingle,
+		Key:         "scheduled-key",
+		RequestHash: hashValue(validated),
+		State:       IdempotencyCompleted,
+		ResourceID:  &resourceID,
+	}
+
+	store := &fakeStore{
+		getIdempotencyFn: func(context.Context, string, string) (*IdempotencyRecord, error) {
+			return record, nil
+		},
+		getFn: func(context.Context, uuid.UUID) (*Notification, error) {
+			return &Notification{ID: resourceID, Status: StatusScheduled}, nil
+		},
+	}
+	service := NewService(store, 5, func() time.Time { return originalNow.Add(2 * time.Hour) })
+
+	n, replayed, err := service.Create(context.Background(), input, "scheduled-key", "req-1")
+	require.NoError(t, err)
+	assert.True(t, replayed)
+	assert.Equal(t, resourceID, n.ID)
+}
+
 func TestServiceCreateIdempotencyConflict(t *testing.T) {
 	input := validSMS()
 	resourceID := uuid.New()
