@@ -246,7 +246,7 @@ Allowed only when the status is `pending` or `scheduled`. Returns `200` with the
 GET /api/v1/batches/0193b2f4-8d2b-7a4f-bc21-6a9d3e5f7c82
 ```
 
-Batch status is derived from the children: `pending`, `processing`, `completed`, `partial_failure`, `failed`, `cancelled`, or `mixed`. If Redis was unavailable at creation time, the batch is accepted as `pending` and the reconciler enqueues it later.
+Batch status is derived from the children: `pending`, `processing`, `completed`, `partial_failure`, `failed`, `cancelled`, or `mixed`. The precedence rules are in `docs/domain-model.md`. If Redis was unavailable at creation time, the batch is accepted as `pending` and the reconciler enqueues it later.
 
 ```json
 {
@@ -320,7 +320,10 @@ The numbers come from the database for the last five minutes and from asynq Insp
   - If it is still running, the server returns `409 idempotency_in_progress`.
 - Same key and a different hash: `422 idempotency_conflict`.
 - Keys expire after 24 hours.
-- Without a key, the server does not deduplicate API calls. The worker still guards against duplicate sends.
+- The API writes the idempotency row and the notification in one transaction. The idempotency row stores `resource_id`.
+- After commit, the API enqueues the task and updates the key to `completed` with the response.
+- An `in_progress` row older than 60 seconds is abandoned. A retry with the same key reclaims it, reads `resource_id`, returns the current notification, and marks the key completed.
+- Without a key, two requests create two distinct notifications with different IDs. The worker guard only prevents repeated work for the same notification ID; it cannot deduplicate separate notifications.
 
 ## 12. OpenAPI and Swagger
 

@@ -199,7 +199,7 @@ A batch has at most 1000 notifications. Validation is all-or-nothing: if one ite
 Two layers:
 
 1. API: optional `Idempotency-Key` header. The key and a hash of the request body are stored. A replay with the same body returns the original response and `Idempotent-Replayed: true`. A replay with a different body returns `422`.
-2. Worker: the asynq task ID is the notification ID, and the task is unique for a fixed TTL. The database state transition is the final guard. A notification can be claimed once per attempt; a transient failure returns it to `queued` and the next attempt claims it again. Manual retries use a fresh task ID so the uniqueness TTL does not block them.
+2. Worker: the asynq task ID is the notification ID, and the task is unique while it is queued (24-hour TTL). The unique lock is not a permanent tombstone; after the task completes, a re-enqueue with the same ID can succeed, but the worker sees the terminal status and stops. The database state transition is the final guard. A notification can be claimed once per attempt; a transient failure returns it to `queued` and the next attempt claims it again. Manual retries use a fresh task ID so the uniqueness TTL does not block them.
 
 ### Retries
 

@@ -26,7 +26,7 @@ Task payload:
 }
 ```
 
-The task ID is the notification ID. It is unique for 24 hours, so the same notification cannot be enqueued twice in that window. Manual retries use a fresh task ID (`<notification_id>:retry:<n>`) so the uniqueness window does not block an operator retry.
+The task ID is the notification ID. The task is unique while it is queued (24-hour TTL). The unique lock is not a permanent tombstone: after the task completes, a re-enqueue with the same ID can succeed, but the worker sees the terminal status and stops. The database state guard is the final defense. Manual retries use a fresh task ID (`<notification_id>:retry:<n>`) so the uniqueness window does not block an operator retry.
 
 ## 3. Worker lifecycle
 
@@ -96,7 +96,7 @@ Example delays for attempts 0 to 3: 0 to 1s, 0 to 2s, 0 to 4s, 0 to 8s.
 | --- | --- | --- |
 | `202` | Success | Mark `accepted`. |
 | `408`, `425`, `429` | Transient | Retry. Honour `Retry-After`. |
-| `500`, `502`, `503`, `504` | Transient | Retry. |
+| Any `5xx` | Transient | Retry. |
 | Network timeout, connection reset, DNS failure | Transient | Retry. |
 | Other `4xx` | Permanent | Mark `failed`. |
 | Invalid URL or unsupported channel | Permanent | Mark `failed`. |
@@ -117,7 +117,13 @@ WHERE status = 'dead_letter'
 ORDER BY updated_at DESC;
 ```
 
-A manual retry resets `attempt_count` to 0, sets `status` to `queued`, clears `last_error`, and enqueues a new task with a fresh task ID (`<notification_id>:retry:<n>`).
+A manual retry:
+
+1. Sets `status` to `pending`, resets `attempt_count` to 0, and clears `last_error`.
+2. Enqueues a fresh task with ID `<notification_id>:retry:<n>`.
+3. Moves the row to `queued`.
+
+If the enqueue fails, the row stays `pending` and the reconciler retries it. The archived task stays in the asynq archive; it is not requeued. Use asynq Inspector to delete it if the archive should be cleaned up.
 
 ## 8. Idempotency
 

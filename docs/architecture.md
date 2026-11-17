@@ -102,6 +102,15 @@ If the process dies after commit and before all tasks are enqueued, the reconcil
 
 The enqueue and the `pending` to `queued` update are not atomic. A worker can dequeue the task before the API writes `queued`, so the worker claim accepts both `pending` and `queued`. This closes the race without a transactional outbox.
 
+The protocol is:
+
+- API commits `pending`, enqueues, then updates to `queued`.
+- Worker claim accepts `pending` or `queued`. A task that arrives before the `queued` update is claimed from `pending`.
+- Reconciler scans `pending` older than one minute. It does not scan `queued`, because a queued row should have a Redis task.
+- Claim also accepts a due `scheduled` row and a stale `processing` row.
+
+A `processing` row is owned by the worker until it writes a retry or terminal state. The claim increments `attempt_count` and refreshes `updated_at`. If the worker dies, `updated_at` stops advancing; after a 2-minute lease a retried task can reclaim the row. The lease is longer than the provider timeout.
+
 ## 6. Module boundaries
 
 | Package | Owns | May import |

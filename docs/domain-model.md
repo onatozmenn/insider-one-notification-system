@@ -180,12 +180,24 @@ Events power the status timeline and the WebSocket feed. They are written in the
 | `key` | `text` | Client-provided `Idempotency-Key`. |
 | `request_hash` | `text` | SHA-256 of the canonical request body. |
 | `state` | `text` | `in_progress` or `completed`. |
+| `resource_id` | `uuid` | Nullable. The notification or batch created by the request. |
 | `response_status` | `int` | Stored response status. |
 | `response_body` | `jsonb` | Stored response body. |
 | `created_at` | `timestamptz` | Default `now()`. |
 | `expires_at` | `timestamptz` | Default `now() + interval '24 hours'`. |
 
 Primary key: `(scope, key)`.
+
+### Create transaction
+
+1. Begin a transaction.
+2. Insert the idempotency row as `in_progress` with `resource_id`.
+3. Insert the notification and its first event.
+4. Commit.
+5. Enqueue the task and move the notification to `queued`.
+6. Update the idempotency row to `completed` with the response.
+
+If the process dies before step 4, the transaction rolls back and a retry starts cleanly. If it dies between 4 and 6, an `in_progress` row remains. A retry after 60 seconds reclaims it, reads `resource_id`, returns the current notification, and marks the key completed. If the enqueue fails, the notification stays `pending` and the reconciler recovers it.
 
 ### `templates` (bonus)
 
@@ -258,15 +270,18 @@ WHERE batch_id = $1
 GROUP BY status;
 ```
 
-| Derived status | Condition |
-| --- | --- |
-| `pending` | All rows are `pending` or `scheduled`. |
-| `processing` | Any row is `queued` or `processing`. |
-| `completed` | All rows are `accepted` or `delivered`. |
-| `partial_failure` | Terminal mix with at least one success and one `failed` or `dead_letter`. |
-| `failed` | All rows are `failed` or `dead_letter`. |
-| `cancelled` | All rows are `cancelled`. |
-| `mixed` | Any other terminal combination, such as `accepted` plus `cancelled`. |
+Evaluate in this order. The first match wins.
+
+1. `processing`: any row is `queued` or `processing`.
+2. `pending`: any row is `pending` or `scheduled`, even if some rows are already terminal.
+3. All rows are terminal:
+   - `completed`: all rows are `accepted` or `delivered`.
+   - `failed`: all rows are `failed` or `dead_letter`.
+   - `cancelled`: all rows are `cancelled`.
+   - `partial_failure`: at least one row is `accepted` or `delivered`, and at least one is `failed` or `dead_letter`.
+   - `mixed`: any other terminal combination, such as `accepted` plus `cancelled`.
+
+This covers every valid mixture and always returns exactly one status.
 
 ## 8. Retention
 

@@ -25,7 +25,7 @@ Use at-least-once delivery and make duplicates unlikely and harmless:
 
 ### Worker layer
 
-- asynq task ID is the notification ID; the task is unique for 24 hours. Manual retries use a fresh task ID (`<notification_id>:retry:<n>`).
+- asynq task ID is the notification ID; the task is unique while it is queued (24-hour TTL). The unique lock is not a permanent tombstone; after processing, the database status guard is the final defense. Manual retries use a fresh task ID (`<notification_id>:retry:<n>`).
 - The status transition is a guarded update. Only one worker can claim a row for a given attempt.
 - The claim accepts `pending`, `queued`, a due `scheduled`, or a stale `processing` row. The stale lease is longer than the provider timeout.
 - The provider request includes `Idempotency-Key: <notification_id>`.
@@ -45,6 +45,7 @@ Negative:
 - A stale-lease recovery can duplicate a call if the original worker is alive but stalled. The lease is longer than the provider timeout to make this rare.
 - A Redis flush can drop queued tasks; the reconciler cannot recover them.
 - Idempotency records add a table and a cleanup job.
+- TaskID uniqueness only covers queued tasks; it is not a 24-hour deduplication window after completion.
 - The API key is optional; without it, duplicate client requests are possible.
 
 ## Alternatives considered
