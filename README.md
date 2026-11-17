@@ -53,7 +53,7 @@ See [docs/architecture.md](docs/architecture.md) for the full design and [docs/d
 | Idempotency | API `Idempotency-Key` plus worker task IDs and guarded transitions. |
 | Recovery | A reconciler re-enqueues `pending` rows after a crash or a short Redis outage. |
 | Scheduling | `scheduled_at` uses asynq `ProcessAt`; cancellation is checked when the task fires. |
-| Templates | Versioned `templates` table, `{{variable}}` rendering, missing variables rejected before enqueue. |
+| Templates | `templates` table, `{{variable}}` rendering, missing variables rejected before enqueue. |
 | Realtime | Redis pub/sub to a WebSocket hub; clients get a snapshot, then live status frames. |
 | Tracing | OpenTelemetry OTLP spans; `traceparent` travels in the asynq payload and the provider request. |
 | Observability | Prometheus metrics, JSON logs, `X-Request-ID`, `/healthz`, `/readyz`, `/api/v1/stats`. |
@@ -266,6 +266,10 @@ On 2026-11-17, against the local Compose stack and webhook.site:
 - Dead-letter retry: `dead_letter` → `POST /retry` → `queued` → `accepted`, attempts reset to 1.
 - WebSocket: snapshot `scheduled`, then `processing`, then `accepted` frames.
 - Tracing: one Jaeger trace contained `POST /api/v1/notifications`, `queue.enqueue`, `notification.process`, and `provider.send`.
+- k6 smoke (5 VUs, 5 seconds): 2027 creates, 0% failed, p95 15.1 ms.
+- k6 burst (20 VUs, 5 seconds): 4468 creates, 0% failed, p95 27.9 ms.
+- Under that burst, Prometheus showed 15.5 SMS provider calls/s with a 4468-deep queue: below the 100/s per-channel cap, with provider latency as the bottleneck.
+- Prometheus targets for API and worker were `up`; Grafana loaded the provisioned dashboard and datasource.
 - CI: test, lint, Docker build, and OpenAPI lint passed.
 
 ## Documentation

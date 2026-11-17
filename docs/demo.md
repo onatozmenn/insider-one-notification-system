@@ -176,7 +176,8 @@ Expected: `202` with `"status":"queued"` and `"attempt_count":0`. Once the worki
 Install [websocat](https://github.com/vi/websocat) or use any WebSocket client:
 
 ```bash
-SCHEDULED_AT=$(date -u -d '+8 seconds' +%Y-%m-%dT%H:%M:%SZ)
+SCHEDULED_AT=$(date -u -d '+20 seconds' +%Y-%m-%dT%H:%M:%SZ)  # GNU date
+# macOS: SCHEDULED_AT=$(date -u -v+20S +%Y-%m-%dT%H:%M:%SZ)
 curl -s -X POST "$BASE_URL/api/v1/notifications" \
   -H 'Content-Type: application/json' \
   -d "{\"recipient\":\"+15555550100\",\"channel\":\"sms\",\"content\":\"WebSocket demo\",\"scheduled_at\":\"$SCHEDULED_AT\"}"
@@ -186,7 +187,7 @@ export NOTIFICATION_ID=<id>
 websocat "ws://localhost:8080/api/v1/ws?notification_id=$NOTIFICATION_ID"
 ```
 
-Expected frames: `snapshot` with `scheduled`, then `status` events for `processing` and `accepted`. If the gateway port is not `8080`, change the URL.
+Expected when connected before the scheduled time: `snapshot` with `scheduled`, then `status` events for `processing` and `accepted`. Frames are best-effort with no replay, so connect before delivery; use a later time if needed. If the gateway port is not `8080`, change the URL.
 
 ## 10. Distributed tracing
 
@@ -219,7 +220,13 @@ docker compose --profile metrics up -d prometheus grafana
 - Prometheus: `http://localhost:9090`
 - Grafana: `http://localhost:3000`, `admin` / `admin`
 
-Open the provisioned `Notification System` dashboard. Run the load test or the demo requests and watch queue depth, status transitions, provider latency, and rate-limit wait.
+Open the provisioned `Notification System` dashboard. Run the load test or the demo requests and watch queue depth, status transitions, provider latency, and rate-limit wait. To check the per-channel provider cap from Prometheus:
+
+```bash
+curl -s 'http://localhost:9090/api/v1/query?query=sum%20by%20(channel)%20(rate(provider_request_total%5B1m%5D))'
+```
+
+Expected while the queue drains: at most `100` provider calls per second per channel.
 
 ## 13. Stats and metrics
 

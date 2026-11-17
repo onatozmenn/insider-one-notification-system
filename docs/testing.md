@@ -2,7 +2,7 @@
 
 ## 1. Strategy
 
-The test suite has four layers. Each layer has a clear job; we do not duplicate the same assertion at every level.
+The test suite has five layers. Each layer has a clear job; we do not duplicate the same assertion at every level.
 
 | Layer | What it proves | Speed | Status |
 | --- | --- | --- | --- |

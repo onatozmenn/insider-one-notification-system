@@ -159,7 +159,7 @@ Redis is treated as disposable. If it is flushed, the reconciler re-enqueues `pe
 | --- | --- | --- |
 | Provider is down or slow | Worker retries with backoff; queue depth grows | Provider recovers; tasks drain |
 | Provider returns a non-retryable 4xx | Notification moves to `failed` | Operator fixes payload or recipient |
-| Retries exhausted | Notification moves to `dead_letter` | Inspect, fix, then `POST /notifications/{id}/retry` |
+| Retries exhausted | Notification moves to `dead_letter` | Inspect, fix, then `POST /api/v1/notifications/{id}/retry` |
 | Redis is down | API can persist but cannot enqueue; readiness fails | Redis returns; reconciler enqueues pending rows |
 | PostgreSQL is down | API returns 503; worker cannot update state | PostgreSQL returns; in-flight tasks retry |
 | Worker crashes mid-call | Task is retried; provider may see a duplicate | DB state guard and provider idempotency header |

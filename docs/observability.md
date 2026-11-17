@@ -151,9 +151,10 @@ The values feed `queue_depth` and `/api/v1/stats`. The poller uses a short timeo
 
 - OpenTelemetry with OTLP HTTP export. `OTEL_EXPORTER_OTLP_ENDPOINT` enables it; an empty value is a no-op.
 - Spans:
-  - HTTP request (API server span).
+  - HTTP request (API server span, named by route).
   - `queue.enqueue` (API producer span).
   - `notification.process` (worker consumer span).
+  - `rate_limit.wait` (worker internal span with the wait duration).
   - `provider.send` (worker client span).
 - W3C `traceparent` is injected into the asynq task payload and the provider request headers, so the API request, queue hop, worker, and provider call share one trace.
 - Jaeger all-in-one runs under the `tracing` compose profile. The OTLP HTTP endpoint is `http://jaeger:4318`; the exporter appends `/v1/traces`.
@@ -184,8 +185,9 @@ Open `http://localhost:16686`, choose the `api` or `worker` service, and inspect
 - Prometheus at `http://localhost:9090`, scraping `api:8080` and `worker:9090` every 5 seconds.
 - Grafana at `http://localhost:3000` (`admin` / `admin`) with a provisioned `Notification System` dashboard:
   - queue depth by queue,
-  - provider requests by result,
+  - provider requests by result and request rate by channel,
   - status transitions by status,
+  - success rate over the selected window,
   - provider p95 latency by channel,
   - rate-limit wait p95 by channel,
   - processing p95 by channel and status.

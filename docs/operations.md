@@ -199,6 +199,7 @@ LIMIT 50;
 2. Inspect the provider response in the logs by `notification_id`.
 3. Fix the cause: bad recipient, provider outage, invalid payload.
 4. Retry with `POST /api/v1/notifications/{id}/retry`. The endpoint resets the row, clears the error, and enqueues a fresh task ID. The archived asynq task stays archived; delete it with asynqmon if the archive should be cleaned up.
+5. If Redis is unavailable during the retry, the row stays `pending`; the reconciler enqueues it when Redis returns. The API still returns `202`.
 
 ### Provider errors
 

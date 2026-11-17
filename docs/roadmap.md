@@ -14,7 +14,7 @@
 - M2 complete.
 - M3: idempotency, cancellation races, failure injection, and stale claims are implemented. Repository integration tests are next.
 - M4 complete.
-- M5 complete: Compose, README, tests, CI, OpenAPI validation, and the v1.0.0 release are in place. A Compose smoke target is still pending.
+- M5 in progress: Compose, README, unit/contract tests, CI, OpenAPI validation, and the v1.0.0 release are in place. Repository integration tests and a Compose smoke target are still pending.
 - M6 complete: scheduled notifications, templates, WebSocket updates, distributed tracing, dead-letter retry, the k6 load test, and the Prometheus/Grafana profile are implemented.
 
 ## 2. Milestones

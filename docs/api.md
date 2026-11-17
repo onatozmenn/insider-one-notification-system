@@ -377,7 +377,7 @@ The numbers come from the database for the last five minutes and from asynq Insp
 ## 14. Idempotency
 
 - The key is scoped by endpoint. The same key on a different endpoint is a different request.
-- The server stores a SHA-256 hash of the canonical JSON body.
+- The server stores a SHA-256 hash of the canonical JSON body. For template requests, the effective request after rendering is hashed, because the rendered notification is what the worker delivers.
 - Same key and same hash:
   - If the original request completed, the resource is re-read and returned with `Idempotent-Replayed: true`.
   - If it is still running, the server returns `409 idempotency_in_progress`. The MVP commits the resource and the idempotency row together, so this state is reserved for future multi-step creates.
