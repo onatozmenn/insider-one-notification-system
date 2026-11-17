@@ -382,7 +382,7 @@ The numbers come from the database for the last five minutes and from asynq Insp
   - If the original request completed, the resource is re-read and returned with `Idempotent-Replayed: true`.
   - If it is still running, the server returns `409 idempotency_in_progress`. The MVP commits the resource and the idempotency row together, so this state is reserved for future multi-step creates.
 - Same key and a different hash: `422 idempotency_conflict`.
-- Keys expire after 24 hours.
+- Keys expire after 24 hours. An expired key is deleted when read and by an hourly cleanup, so it can be reused.
 - The notification (or batch) and the completed idempotency row commit in one transaction. The row stores `resource_id`.
 - If the transaction fails, nothing is committed and a retry starts cleanly. A concurrent request with the same key gets a unique violation, reads the completed row, and replays the resource.
 - Without a key, two requests create two distinct notifications with different IDs. The worker guard only prevents repeated work for the same notification ID; it cannot deduplicate separate notifications.

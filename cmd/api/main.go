@@ -71,7 +71,7 @@ func run() error {
 	queue := delivery.NewQueue(asynq.RedisClientOpt{
 		Addr:     cfg.RedisAddr,
 		Password: cfg.RedisPassword,
-	}, cfg.MaxAttempts-1, log)
+	}, delivery.TransportMaxRetries, log)
 	defer func() {
 		_ = queue.Close()
 	}()
@@ -85,6 +85,7 @@ func run() error {
 	appMetrics.SetBuildInfo(build.Version, build.Commit, build.Date)
 
 	go delivery.PollQueueDepth(ctx, queue, appMetrics, 5*time.Second)
+	go notifications.RunIdempotencyCleanup(ctx, time.Hour)
 
 	var hub *realtime.Hub
 	if cfg.WebSocketEnabled {

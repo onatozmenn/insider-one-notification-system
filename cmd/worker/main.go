@@ -90,7 +90,7 @@ func run() error {
 		}
 	}()
 
-	queue := delivery.NewQueue(redisOptions, cfg.MaxAttempts-1, log)
+	queue := delivery.NewQueue(redisOptions, delivery.TransportMaxRetries, log)
 	defer func() {
 		_ = queue.Close()
 	}()

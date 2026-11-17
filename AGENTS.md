@@ -180,7 +180,7 @@ Every choice is mature and boring. The assessment is about design and reliabilit
 - `processing` to `dead_letter` when the last attempt fails with a transient error.
 - Every transition is a guarded SQL update. If zero rows change, the worker stops.
 - `attempt_count` increments on every provider attempt, including successful and permanent outcomes.
-- A `processing` row whose lease has expired can be reclaimed by a retried task. The lease is longer than the provider timeout.
+- A `processing` row whose lease has expired can be reclaimed by a retried task. If it has already used every attempt, it moves to `dead_letter` instead of being reclaimed. The lease is longer than the provider timeout.
 
 ### Channels and limits
 
@@ -208,7 +208,8 @@ Two layers:
 - Backoff: exponential with full jitter. Base 1s, factor 2, cap 30s.
 - Maximum attempts: 5 total, configurable.
 - Respect `Retry-After` when the provider sends it.
-- Exhausted retries move the notification to `dead_letter` and emit a metric.
+- Exhausted provider retries move the notification to `dead_letter` and emit a metric.
+- Infrastructure errors before the provider call use a separate asynq transport retry budget and do not increment `attempt_count`.
 - Provider timeout: 10 seconds per attempt.
 
 ### Rate limiting
@@ -225,7 +226,7 @@ Only `pending` and `scheduled` notifications can be cancelled. Anything else ret
 
 ### Delivery contract
 
-At-least-once while PostgreSQL has accepted the work and Redis still holds the task. We reduce duplicate sends with idempotency keys and state guards, but we do not promise exactly-once. A Redis flush can drop queued tasks; the reconciler only recovers `pending` rows. Production would use a durable outbox or queue.
+At-least-once after PostgreSQL accepts the work. A notification may be sent more than once if a worker crashes after the provider accepted it and before the database update commits. We reduce duplicate sends with idempotency keys and state guards, but we do not promise exactly-once. A Redis flush can drop queued tasks; the reconciler re-enqueues pending rows, due scheduled rows, and queued rows idle for 15 minutes. Production would use a durable outbox or queue.
 
 ## 8. API rules
 

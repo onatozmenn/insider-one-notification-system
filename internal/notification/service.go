@@ -23,6 +23,7 @@ type Store interface {
 	Cancel(ctx context.Context, id uuid.UUID) (*Notification, error)
 	GetBatch(ctx context.Context, id uuid.UUID) (*Batch, error)
 	GetIdempotency(ctx context.Context, scope, key string) (*IdempotencyRecord, error)
+	DeleteExpiredIdempotency(ctx context.Context) (int64, error)
 	MarkQueued(ctx context.Context, id uuid.UUID) (*Notification, error)
 	Retry(ctx context.Context, id uuid.UUID) (*Notification, error)
 	Stats(ctx context.Context, since time.Time) (Stats, error)
@@ -424,6 +425,40 @@ func (s *Service) GetTemplate(ctx context.Context, id uuid.UUID) (*Template, err
 // ListTemplates returns all templates.
 func (s *Service) ListTemplates(ctx context.Context) ([]Template, error) {
 	return s.store.ListTemplates(ctx)
+}
+
+// RunIdempotencyCleanup deletes expired idempotency keys until the context is
+// canceled. Reads also delete their expired key, so this loop keeps the table
+// from growing without bound.
+func (s *Service) RunIdempotencyCleanup(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Hour
+	}
+
+	cleanup := func() {
+		deleted, err := s.store.DeleteExpiredIdempotency(ctx)
+		if err != nil {
+			s.logger.Warn("idempotency cleanup failed", "error", err)
+			return
+		}
+		if deleted > 0 {
+			s.logger.Info("expired idempotency keys deleted", "count", deleted)
+		}
+	}
+
+	cleanup()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cleanup()
+		}
+	}
 }
 
 func (s *Service) enqueueSingle(ctx context.Context, n *Notification) (*Notification, bool, error) {

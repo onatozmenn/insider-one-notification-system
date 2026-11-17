@@ -48,7 +48,7 @@ func TestMain(m *testing.M) {
 	deliveryPostgres = postgres
 	deliveryRedis = redisInfra
 	deliveryRepo = notification.NewRepository(postgres.Pool)
-	deliveryQueue = NewQueue(asynq.RedisClientOpt{Addr: redisInfra.Addr}, 4, deliveryLogger)
+	deliveryQueue = NewQueue(asynq.RedisClientOpt{Addr: redisInfra.Addr}, TransportMaxRetries, deliveryLogger)
 
 	code := m.Run()
 
@@ -89,6 +89,48 @@ func TestReconcilerEnqueuesPendingRows(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, notification.StatusQueued, stored.Status)
 
+	waitForQueueDepth(t, deliveryQueue, 1)
+}
+
+func TestReconcilerEnqueuesDueScheduledRow(t *testing.T) {
+	ctx := context.Background()
+	resetDeliveryState(t)
+
+	now := time.Now().UTC()
+	scheduledAt := now.Add(-time.Second)
+	n := deliveryNotification()
+	n.Status = notification.StatusScheduled
+	n.ScheduledAt = &scheduledAt
+	n.CreatedAt = now.Add(-2 * time.Minute)
+	n.UpdatedAt = n.CreatedAt
+	_, err := deliveryRepo.Create(ctx, n, []byte(`{}`), nil)
+	require.NoError(t, err)
+
+	NewReconciler(deliveryRepo, deliveryQueue, deliveryLogger).runOnce(ctx)
+
+	stored, err := deliveryRepo.Get(ctx, n.ID)
+	require.NoError(t, err)
+	assert.Equal(t, notification.StatusScheduled, stored.Status)
+	waitForQueueDepth(t, deliveryQueue, 1)
+}
+
+func TestReconcilerRequeuesStaleQueuedRow(t *testing.T) {
+	ctx := context.Background()
+	resetDeliveryState(t)
+
+	now := time.Now().UTC()
+	n := deliveryNotification()
+	n.Status = notification.StatusQueued
+	n.CreatedAt = now.Add(-30 * time.Minute)
+	n.UpdatedAt = now.Add(-20 * time.Minute)
+	_, err := deliveryRepo.Create(ctx, n, []byte(`{}`), nil)
+	require.NoError(t, err)
+
+	NewReconciler(deliveryRepo, deliveryQueue, deliveryLogger).runOnce(ctx)
+
+	stored, err := deliveryRepo.Get(ctx, n.ID)
+	require.NoError(t, err)
+	assert.Equal(t, notification.StatusQueued, stored.Status)
 	waitForQueueDepth(t, deliveryQueue, 1)
 }
 

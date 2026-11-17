@@ -340,6 +340,146 @@ func TestRepositoryRetryAndCancel(t *testing.T) {
 	require.ErrorIs(t, err, ErrNotCancellable)
 }
 
+func TestRepositoryReconcilableRows(t *testing.T) {
+	ctx := context.Background()
+	resetIntegrationDB(t)
+
+	now := time.Now().UTC()
+	scheduledAt := now.Add(-time.Second)
+	oldPending := integrationNotification()
+	oldPending.CreatedAt = now.Add(-2 * time.Minute)
+	oldPending.UpdatedAt = oldPending.CreatedAt
+	_, err := integrationRepo.Create(ctx, oldPending, []byte(`{}`), nil)
+	require.NoError(t, err)
+
+	dueScheduled := integrationNotification()
+	dueScheduled.Status = StatusScheduled
+	dueScheduled.ScheduledAt = &scheduledAt
+	dueScheduled.CreatedAt = now.Add(-2 * time.Minute)
+	dueScheduled.UpdatedAt = dueScheduled.CreatedAt
+	_, err = integrationRepo.Create(ctx, dueScheduled, []byte(`{}`), nil)
+	require.NoError(t, err)
+
+	staleQueued := integrationNotification()
+	staleQueued.Status = StatusQueued
+	staleQueued.CreatedAt = now.Add(-30 * time.Minute)
+	staleQueued.UpdatedAt = now.Add(-20 * time.Minute)
+	_, err = integrationRepo.Create(ctx, staleQueued, []byte(`{}`), nil)
+	require.NoError(t, err)
+
+	currentQueued := integrationNotification()
+	currentQueued.Status = StatusQueued
+	currentQueued.CreatedAt = now
+	currentQueued.UpdatedAt = now
+	_, err = integrationRepo.Create(ctx, currentQueued, []byte(`{}`), nil)
+	require.NoError(t, err)
+
+	items, err := integrationRepo.ListReconcilable(
+		ctx,
+		now.Add(-time.Minute),
+		now,
+		now.Add(-15*time.Minute),
+		10,
+	)
+	require.NoError(t, err)
+	require.Len(t, items, 3)
+
+	ids := map[uuid.UUID]bool{}
+	for _, item := range items {
+		ids[item.ID] = true
+	}
+	assert.True(t, ids[oldPending.ID])
+	assert.True(t, ids[dueScheduled.ID])
+	assert.True(t, ids[staleQueued.ID])
+	assert.False(t, ids[currentQueued.ID])
+}
+
+func TestRepositoryMarkExhaustedLease(t *testing.T) {
+	ctx := context.Background()
+	resetIntegrationDB(t)
+
+	n := integrationNotification()
+	_, err := integrationRepo.Create(ctx, n, []byte(`{}`), nil)
+	require.NoError(t, err)
+	_, err = integrationRepo.Claim(ctx, n.ID, time.Now().UTC(), 2*time.Minute)
+	require.NoError(t, err)
+
+	now := time.Now().UTC()
+	_, err = integrationPool.Exec(ctx,
+		`UPDATE notifications SET attempt_count = 5, updated_at = $2 WHERE id = $1`,
+		n.ID, now.Add(-3*time.Minute),
+	)
+	require.NoError(t, err)
+
+	_, err = integrationRepo.Claim(ctx, n.ID, now, 2*time.Minute)
+	require.ErrorIs(t, err, ErrNotClaimable, "a stale row at max_attempts must not be reclaimed")
+
+	dead, err := integrationRepo.MarkExhaustedLease(ctx, n.ID, now, 2*time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, StatusDeadLetter, dead.Status)
+	assert.Equal(t, 5, dead.AttemptCount)
+	require.NotNil(t, dead.LastError)
+	assert.Equal(t, "processing lease expired after final attempt", *dead.LastError)
+
+	_, err = integrationRepo.MarkExhaustedLease(ctx, n.ID, now, 2*time.Minute)
+	require.ErrorIs(t, err, ErrNotClaimable)
+}
+
+func TestRepositoryExpiredIdempotencyKey(t *testing.T) {
+	ctx := context.Background()
+	resetIntegrationDB(t)
+
+	first := integrationNotification()
+	_, err := integrationRepo.Create(ctx, first, []byte(`{}`), &IdempotencyRecord{
+		Scope:          ScopeSingle,
+		Key:            "expiring-key",
+		RequestHash:    "hash-1",
+		State:          IdempotencyCompleted,
+		ResourceID:     &first.ID,
+		ResponseStatus: 202,
+	})
+	require.NoError(t, err)
+
+	_, err = integrationPool.Exec(ctx,
+		`UPDATE idempotency_keys SET expires_at = now() - interval '1 hour'
+		 WHERE scope = $1 AND key = $2`,
+		ScopeSingle, "expiring-key",
+	)
+	require.NoError(t, err)
+
+	_, err = integrationRepo.GetIdempotency(ctx, ScopeSingle, "expiring-key")
+	require.ErrorIs(t, err, ErrNotFound)
+
+	var remaining int
+	require.NoError(t, integrationPool.QueryRow(ctx,
+		`SELECT count(*) FROM idempotency_keys WHERE scope = $1 AND key = $2`,
+		ScopeSingle, "expiring-key",
+	).Scan(&remaining))
+	assert.Zero(t, remaining, "an expired key must be removed so it can be reused")
+
+	second := integrationNotification()
+	_, err = integrationRepo.Create(ctx, second, []byte(`{}`), &IdempotencyRecord{
+		Scope:          ScopeSingle,
+		Key:            "expiring-key",
+		RequestHash:    "hash-2",
+		State:          IdempotencyCompleted,
+		ResourceID:     &second.ID,
+		ResponseStatus: 202,
+	})
+	require.NoError(t, err)
+
+	_, err = integrationPool.Exec(ctx,
+		`UPDATE idempotency_keys SET expires_at = now() - interval '1 hour'
+		 WHERE scope = $1 AND key = $2`,
+		ScopeSingle, "expiring-key",
+	)
+	require.NoError(t, err)
+
+	deleted, err := integrationRepo.DeleteExpiredIdempotency(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), deleted)
+}
+
 func resetIntegrationDB(t *testing.T) {
 	t.Helper()
 	require.NoError(t, integrationPostgres.Reset(context.Background()))

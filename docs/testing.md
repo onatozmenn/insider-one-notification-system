@@ -63,9 +63,12 @@ Integration tests use real PostgreSQL and Redis. They are behind the `integratio
   - Idempotency key conflict behaviour.
   - Templates, duplicate names, and the email-subject database constraint.
   - Retry and cancellation guards.
+  - Reconcilable pending, due scheduled, and stale queued rows.
+  - Stale processing at `max_attempts` moves to `dead_letter`.
+  - Expired idempotency keys are deleted and can be reused.
 - `internal/delivery/delivery_integration_test.go`:
   - Manual retries are not collapsed by the asynq uniqueness lock.
-  - The reconciler enqueues an old `pending` row and marks it `queued`.
+  - The reconciler enqueues old pending, due scheduled, and stale queued rows.
   - Queue depth polling.
   - Worker start and shutdown against Redis.
 - `internal/realtime/hub_integration_test.go`:
@@ -175,7 +178,7 @@ The other jobs run `golangci-lint`, OpenAPI lint, Compose validation, and the Do
 ## 8. Coverage
 
 - Target: 70% or more on `internal/notification` and `internal/delivery`.
-- Current local result with the integration tag: `internal/notification` 75.8%, `internal/delivery` 70.3%, combined 74.3%.
+- Current local result with the integration tag: `internal/notification` 76.1%, `internal/delivery` 75.2%, combined 75.8%.
 - `make coverage` prints the per-function report and writes `coverage.out`.
 - Do not chase 100%. Generated code and `main` packages are excluded.
 - Coverage is reported, not enforced as a hard gate. A missing test for a core rule is a review blocker.
