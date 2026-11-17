@@ -12,6 +12,8 @@ var (
 	ErrBatchNotFound = errors.New("batch not found")
 	// ErrNotCancellable means the notification is past the cancellable states.
 	ErrNotCancellable = errors.New("notification is not cancellable")
+	// ErrNotClaimable means another worker or a terminal state won the race.
+	ErrNotClaimable = errors.New("notification is not claimable")
 	// ErrIdempotencyConflict means the key was reused with a different body.
 	ErrIdempotencyConflict = errors.New("idempotency key reused with a different request body")
 	// ErrIdempotencyInProgress means the original request is still running.

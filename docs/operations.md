@@ -8,8 +8,6 @@
 
 ## 2. Quickstart
 
-The Compose stack lands in M0-4 and is completed in M5-1. The commands below are the target interface.
-
 ```bash
 git clone https://github.com/onatozmenn/insider-one-notification-system.git
 cd insider-one-notification-system

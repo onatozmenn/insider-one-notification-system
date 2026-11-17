@@ -19,6 +19,7 @@ type fakeStore struct {
 	cancelFn         func(context.Context, uuid.UUID) (*Notification, error)
 	getBatchFn       func(context.Context, uuid.UUID) (*Batch, error)
 	getIdempotencyFn func(context.Context, string, string) (*IdempotencyRecord, error)
+	markQueuedFn     func(context.Context, uuid.UUID) (*Notification, error)
 }
 
 func (f *fakeStore) Create(ctx context.Context, n *Notification, detail []byte, idem *IdempotencyRecord) (*Notification, error) {
@@ -70,6 +71,32 @@ func (f *fakeStore) GetIdempotency(ctx context.Context, scope, key string) (*Ide
 	return f.getIdempotencyFn(ctx, scope, key)
 }
 
+func (f *fakeStore) MarkQueued(ctx context.Context, id uuid.UUID) (*Notification, error) {
+	if f.markQueuedFn == nil {
+		return nil, errors.New("unexpected MarkQueued call")
+	}
+	return f.markQueuedFn(ctx, id)
+}
+
+type fakeEnqueuer struct {
+	enqueueFn func(context.Context, uuid.UUID, Priority, string, *time.Time) error
+	calls     int
+}
+
+func (f *fakeEnqueuer) Enqueue(
+	ctx context.Context,
+	id uuid.UUID,
+	priority Priority,
+	correlationID string,
+	scheduledAt *time.Time,
+) error {
+	f.calls++
+	if f.enqueueFn == nil {
+		return nil
+	}
+	return f.enqueueFn(ctx, id, priority, correlationID, scheduledAt)
+}
+
 func fixedNow() time.Time {
 	return time.Date(2026, 11, 17, 19, 0, 0, 0, time.UTC)
 }
@@ -99,6 +126,44 @@ func TestServiceCreate(t *testing.T) {
 	assert.Equal(t, "req-1", n.CorrelationID)
 	assert.Equal(t, fixedNow(), n.CreatedAt)
 	assert.Nil(t, idem)
+}
+
+func TestServiceCreateEnqueues(t *testing.T) {
+	store := &fakeStore{
+		createFn: func(_ context.Context, n *Notification, _ []byte, _ *IdempotencyRecord) (*Notification, error) {
+			return n, nil
+		},
+		markQueuedFn: func(_ context.Context, id uuid.UUID) (*Notification, error) {
+			return &Notification{ID: id, Status: StatusQueued}, nil
+		},
+	}
+	enqueuer := &fakeEnqueuer{}
+	service := NewService(store, 5, fixedNow).WithEnqueuer(enqueuer)
+
+	n, replayed, err := service.Create(context.Background(), validSMS(), "", "req-1")
+	require.NoError(t, err)
+	assert.False(t, replayed)
+	assert.Equal(t, 1, enqueuer.calls)
+	assert.Equal(t, StatusQueued, n.Status)
+}
+
+func TestServiceCreateEnqueueFailureLeavesPending(t *testing.T) {
+	store := &fakeStore{
+		createFn: func(_ context.Context, n *Notification, _ []byte, _ *IdempotencyRecord) (*Notification, error) {
+			return n, nil
+		},
+	}
+	enqueuer := &fakeEnqueuer{
+		enqueueFn: func(context.Context, uuid.UUID, Priority, string, *time.Time) error {
+			return errors.New("redis down")
+		},
+	}
+	service := NewService(store, 5, fixedNow).WithEnqueuer(enqueuer)
+
+	n, replayed, err := service.Create(context.Background(), validSMS(), "", "req-1")
+	require.NoError(t, err)
+	assert.False(t, replayed)
+	assert.Equal(t, StatusPending, n.Status)
 }
 
 func TestServiceCreateIdempotentReplay(t *testing.T) {
@@ -195,6 +260,28 @@ func TestServiceCreateBatch(t *testing.T) {
 		assert.Equal(t, batch.ID, *item.BatchID)
 		assert.Equal(t, StatusPending, item.Status)
 	}
+}
+
+func TestServiceCreateBatchEnqueues(t *testing.T) {
+	store := &fakeStore{
+		createBatchFn: func(_ context.Context, batch *Batch, _ []*Notification, _ *IdempotencyRecord) (*Batch, error) {
+			return batch, nil
+		},
+		markQueuedFn: func(_ context.Context, id uuid.UUID) (*Notification, error) {
+			return &Notification{ID: id, Status: StatusQueued}, nil
+		},
+	}
+	enqueuer := &fakeEnqueuer{}
+	service := NewService(store, 5, fixedNow).WithEnqueuer(enqueuer)
+
+	batch, replayed, err := service.CreateBatch(context.Background(), BatchInput{
+		Notifications: []CreateInput{validSMS(), validSMS()},
+	}, "", "req-1")
+	require.NoError(t, err)
+	assert.False(t, replayed)
+	assert.Equal(t, 2, enqueuer.calls)
+	assert.Equal(t, BatchStatusProcessing, batch.Status)
+	assert.Equal(t, 2, batch.Counts[StatusQueued])
 }
 
 func TestServiceCreateBatchIdempotentReplay(t *testing.T) {

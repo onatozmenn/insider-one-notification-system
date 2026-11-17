@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -22,13 +23,21 @@ type Store interface {
 	Cancel(ctx context.Context, id uuid.UUID) (*Notification, error)
 	GetBatch(ctx context.Context, id uuid.UUID) (*Batch, error)
 	GetIdempotency(ctx context.Context, scope, key string) (*IdempotencyRecord, error)
+	MarkQueued(ctx context.Context, id uuid.UUID) (*Notification, error)
+}
+
+// Enqueuer submits a persisted notification to the delivery queue.
+type Enqueuer interface {
+	Enqueue(ctx context.Context, id uuid.UUID, priority Priority, correlationID string, scheduledAt *time.Time) error
 }
 
 var _ Store = (*Repository)(nil)
 
-// Service applies validation, id generation, and idempotency rules.
+// Service applies validation, id generation, idempotency, and enqueue rules.
 type Service struct {
 	store       Store
+	enqueuer    Enqueuer
+	logger      *slog.Logger
 	maxAttempts int
 	now         func() time.Time
 }
@@ -43,9 +52,24 @@ func NewService(store Store, maxAttempts int, now func() time.Time) *Service {
 	}
 	return &Service{
 		store:       store,
+		logger:      slog.Default(),
 		maxAttempts: maxAttempts,
 		now:         now,
 	}
+}
+
+// WithEnqueuer enables queue submission after persistence.
+func (s *Service) WithEnqueuer(enqueuer Enqueuer) *Service {
+	s.enqueuer = enqueuer
+	return s
+}
+
+// WithLogger sets the service logger.
+func (s *Service) WithLogger(logger *slog.Logger) *Service {
+	if logger != nil {
+		s.logger = logger
+	}
+	return s
 }
 
 // Create validates and persists one notification.
@@ -126,7 +150,7 @@ func (s *Service) Create(
 		return nil, false, err
 	}
 
-	return created, false, nil
+	return s.enqueueSingle(ctx, created)
 }
 
 // CreateBatch validates and persists a batch of notifications.
@@ -226,7 +250,7 @@ func (s *Service) CreateBatch(
 		return nil, false, err
 	}
 
-	return created, false, nil
+	return s.enqueueBatch(ctx, created, items)
 }
 
 // Get returns one notification.
@@ -248,6 +272,79 @@ func (s *Service) Cancel(ctx context.Context, id uuid.UUID) (*Notification, erro
 // GetBatch returns a batch summary.
 func (s *Service) GetBatch(ctx context.Context, id uuid.UUID) (*Batch, error) {
 	return s.store.GetBatch(ctx, id)
+}
+
+func (s *Service) enqueueSingle(ctx context.Context, n *Notification) (*Notification, bool, error) {
+	if s.enqueuer == nil {
+		return n, false, nil
+	}
+
+	if err := s.enqueuer.Enqueue(ctx, n.ID, n.Priority, n.CorrelationID, n.ScheduledAt); err != nil {
+		s.logger.Warn("enqueue failed; reconciler will retry",
+			"notification_id", n.ID,
+			"error", err,
+		)
+		return n, false, nil
+	}
+
+	if n.ScheduledAt != nil {
+		return n, false, nil
+	}
+
+	queued, err := s.store.MarkQueued(ctx, n.ID)
+	if err != nil {
+		s.logger.Warn("failed to mark notification queued",
+			"notification_id", n.ID,
+			"error", err,
+		)
+		return n, false, nil
+	}
+
+	return queued, false, nil
+}
+
+func (s *Service) enqueueBatch(
+	ctx context.Context,
+	batch *Batch,
+	items []*Notification,
+) (*Batch, bool, error) {
+	if s.enqueuer == nil {
+		return batch, false, nil
+	}
+
+	counts := make(map[Status]int)
+	for _, item := range items {
+		if err := s.enqueuer.Enqueue(ctx, item.ID, item.Priority, item.CorrelationID, item.ScheduledAt); err != nil {
+			s.logger.Warn("batch enqueue failed; reconciler will retry",
+				"notification_id", item.ID,
+				"batch_id", batch.ID,
+				"error", err,
+			)
+			counts[StatusPending]++
+			continue
+		}
+
+		if item.ScheduledAt != nil {
+			counts[StatusScheduled]++
+			continue
+		}
+
+		queued, err := s.store.MarkQueued(ctx, item.ID)
+		if err != nil {
+			s.logger.Warn("failed to mark batch item queued",
+				"notification_id", item.ID,
+				"batch_id", batch.ID,
+				"error", err,
+			)
+			counts[StatusPending]++
+			continue
+		}
+		counts[queued.Status]++
+	}
+
+	batch.Counts = counts
+	batch.Status = DeriveBatchStatus(counts, batch.Total)
+	return batch, false, nil
 }
 
 func (s *Service) replaySingle(

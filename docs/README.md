@@ -26,4 +26,4 @@ This folder explains the design behind the notification system. Start with the p
 
 ## Status
 
-Design phase. During this phase, code follows these documents. If the design changes, update the document first in the same pull request and record the reason in an ADR. Once the implementation is complete, code and docs must change together.
+The core MVP is implemented. The documents describe the target design; when code and docs disagree, fix one of them in the same pull request. Design changes go through an ADR.

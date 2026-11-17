@@ -10,7 +10,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hibiken/asynq"
+
 	"github.com/onatozmenn/insider-one-notification-system/internal/api"
+	"github.com/onatozmenn/insider-one-notification-system/internal/delivery"
 	"github.com/onatozmenn/insider-one-notification-system/internal/notification"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/config"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/logger"
@@ -49,7 +52,18 @@ func run() error {
 	defer func() { _ = rdb.Close() }()
 
 	store := notification.NewRepository(db)
-	notifications := notification.NewService(store, cfg.MaxAttempts, time.Now)
+
+	queue := delivery.NewQueue(asynq.RedisClientOpt{
+		Addr:     cfg.RedisAddr,
+		Password: cfg.RedisPassword,
+	}, cfg.MaxAttempts-1, log)
+	defer func() {
+		_ = queue.Close()
+	}()
+
+	notifications := notification.NewService(store, cfg.MaxAttempts, time.Now).
+		WithEnqueuer(queue).
+		WithLogger(log)
 
 	router := api.NewRouter(api.Dependencies{
 		Logger: log,

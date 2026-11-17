@@ -114,7 +114,7 @@ The script fails with a non-zero exit code and prints the last status and logs o
 
 ## 6. Commands
 
-These targets land with the Go module and Makefile (M0-2) and the full suite (M5-3).
+The unit targets are available now. Integration and smoke targets are still in progress.
 
 ```bash
 # Everything
@@ -146,7 +146,7 @@ docker compose --profile test run --rm test
 
 ## 7. CI
 
-The planned `.github/workflows/ci.yml` (M0-5) will run on every push and pull request:
+`.github/workflows/ci.yml` runs on every push and pull request:
 
 1. `gofmt` and `goimports` check.
 2. `golangci-lint`.
