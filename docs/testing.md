@@ -69,6 +69,7 @@ Integration tests use real PostgreSQL and Redis. They are behind the `integratio
 - `internal/delivery/delivery_integration_test.go`:
   - Manual retries are not collapsed by the asynq uniqueness lock.
   - The reconciler enqueues old pending, due scheduled, and stale queued rows.
+  - An archived task with the same ID is removed and re-enqueued.
   - Queue depth polling.
   - Worker start and shutdown against Redis.
 - `internal/realtime/hub_integration_test.go`:
@@ -178,7 +179,7 @@ The other jobs run `golangci-lint`, OpenAPI lint, Compose validation, and the Do
 ## 8. Coverage
 
 - Target: 70% or more on `internal/notification` and `internal/delivery`.
-- Current local result with the integration tag: `internal/notification` 76.1%, `internal/delivery` 75.2%, combined 75.8%.
+- Current local result with the integration tag: `internal/notification` 76.1%, `internal/delivery` 73.5%, combined 75.3%.
 - `make coverage` prints the per-function report and writes `coverage.out`.
 - Do not chase 100%. Generated code and `main` packages are excluded.
 - Coverage is reported, not enforced as a hard gate. A missing test for a core rule is a review blocker.

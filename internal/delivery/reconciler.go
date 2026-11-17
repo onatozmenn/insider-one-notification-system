@@ -70,7 +70,7 @@ func (r *Reconciler) runOnce(ctx context.Context) {
 	for _, n := range items {
 		// Due scheduled and stale queued rows already have the right status.
 		// Pending rows move to queued only after a successful enqueue.
-		if err := r.queue.Enqueue(ctx, n.ID, n.Priority, n.CorrelationID, nil); err != nil {
+		if err := r.queue.ReconcileEnqueue(ctx, n.ID, n.Priority, n.CorrelationID); err != nil {
 			r.logger.Warn("reconciler failed to enqueue notification",
 				"notification_id", n.ID,
 				"status", n.Status,

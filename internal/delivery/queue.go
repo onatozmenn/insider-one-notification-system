@@ -112,6 +112,64 @@ func (q *Queue) EnqueueRetry(
 	return q.enqueue(ctx, taskID, id, priority, correlationID, nil, 0)
 }
 
+// EnqueueFresh submits a recovery task with a new task ID and no uniqueness
+// lock. It is used when an archived task still owns the notification ID.
+func (q *Queue) EnqueueFresh(
+	ctx context.Context,
+	id uuid.UUID,
+	priority notification.Priority,
+	correlationID string,
+) error {
+	taskID := fmt.Sprintf("%s:recover:%d", id, time.Now().UnixNano())
+	return q.enqueue(ctx, taskID, id, priority, correlationID, nil, 0)
+}
+
+// ReconcileEnqueue ensures that a task exists for the notification. Archived
+// tasks retain their task ID, so they are deleted before the same ID is used
+// again. A completed task is left alone and a fresh recovery task is created.
+func (q *Queue) ReconcileEnqueue(
+	ctx context.Context,
+	id uuid.UUID,
+	priority notification.Priority,
+	correlationID string,
+) error {
+	queueName := queueForPriority(priority)
+	info, err := q.inspector.GetTaskInfo(queueName, id.String())
+	switch {
+	case err == nil:
+		switch info.State {
+		case asynq.TaskStateArchived:
+			if err := q.inspector.DeleteTask(queueName, id.String()); err != nil {
+				return fmt.Errorf("delete archived task: %w", err)
+			}
+		case asynq.TaskStateCompleted:
+			return q.EnqueueFresh(ctx, id, priority, correlationID)
+		default:
+			return nil
+		}
+	case errors.Is(err, asynq.ErrTaskNotFound), errors.Is(err, asynq.ErrQueueNotFound):
+		// No task exists; enqueue below.
+	default:
+		return fmt.Errorf("inspect queue task: %w", err)
+	}
+
+	if err := q.Enqueue(ctx, id, priority, correlationID, nil); err != nil {
+		if errors.Is(err, asynq.ErrTaskIDConflict) {
+			return q.EnqueueFresh(ctx, id, priority, correlationID)
+		}
+		return err
+	}
+
+	// A unique lock can survive an archived task even after DeleteTask. In that
+	// case Enqueue treats the duplicate as success but creates no task.
+	if _, err := q.inspector.GetTaskInfo(queueName, id.String()); errors.Is(err, asynq.ErrTaskNotFound) {
+		return q.EnqueueFresh(ctx, id, priority, correlationID)
+	} else if err != nil && !errors.Is(err, asynq.ErrQueueNotFound) {
+		return fmt.Errorf("verify reconciled task: %w", err)
+	}
+	return nil
+}
+
 func (q *Queue) enqueue(
 	ctx context.Context,
 	taskID string,

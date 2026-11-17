@@ -236,7 +236,7 @@ curl -s http://localhost:8080/api/v1/stats
 - **Templates:** the API renders the template before validation. A missing variable rejects the request with `variables.<name>` details. The stored notification keeps the rendered content.
 - **Idempotency:** the API stores a key and request hash and replays the original resource. Keys expire after 24 hours; expired rows are deleted on read and by an hourly cleanup, so the key can be reused. The worker uses the notification ID as the task ID and guards every transition.
 - **Cancellation:** only `pending` and `scheduled`; the worker re-checks before the provider call.
-- **Recovery:** a reconciler every 30 seconds re-enqueues pending rows, due scheduled rows, and queued rows that have not advanced for 15 minutes. A stale `processing` row can be reclaimed after the lease; if it already used every attempt, it moves to `dead_letter`.
+- **Recovery:** a reconciler every 30 seconds re-enqueues pending rows, due scheduled rows, and queued rows that have not advanced for 15 minutes. Archived tasks that still own the ID are removed and re-enqueued. A stale `processing` row can be reclaimed after the lease; if it already used every attempt, it moves to `dead_letter`.
 
 ## Testing
 
@@ -252,7 +252,7 @@ make load-test      # k6 create throughput, requires k6 and a running stack
 
 The suite covers validation, idempotency and service rules, templates and rendering, API handlers, WebSocket frames, provider responses (202, 400, 429, 500, timeout), worker transitions, retry backoff, priority mapping, tracing endpoint handling, repository transitions, job queueing, the reconciler, and Redis pub/sub. Provider tests use `httptest` and do not depend on webhook.site.
 
-Integration tests use testcontainers locally and GitHub Actions service containers in CI. Current coverage is 76.1% for `internal/notification` and 75.2% for `internal/delivery`. The manual end-to-end checks below were run against the Compose stack and the bonus features were exercised the same way.
+Integration tests use testcontainers locally and GitHub Actions service containers in CI. Current coverage is 76.1% for `internal/notification` and 73.5% for `internal/delivery`. The manual end-to-end checks below were run against the Compose stack and the bonus features were exercised the same way.
 
 ## Verified end-to-end
 
@@ -275,7 +275,7 @@ On 2026-11-18, against the local Compose stack and webhook.site:
 - Under that burst, Prometheus showed 15.5 SMS provider calls/s with a 4468-deep queue: below the 100/s per-channel cap, with provider latency as the bottleneck.
 - Prometheus targets for API and worker were `up`; Grafana loaded the provisioned dashboard and datasource.
 - `make smoke`: one notification and a batch of three reached `accepted`; `/stats` returned counts.
-- Recovery regression tests: due scheduled and stale queued rows were re-enqueued; a stale processing row at `max_attempts` moved to `dead_letter`; an expired idempotency key was deleted and reused.
+- Recovery regression tests: due scheduled and stale queued rows were re-enqueued; an archived task was removed and re-enqueued; a stale processing row at `max_attempts` moved to `dead_letter`; an expired idempotency key was deleted and reused.
 - CI: unit, integration, coverage, lint, Docker build, and OpenAPI lint passed.
 
 ## Documentation
