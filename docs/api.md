@@ -322,7 +322,7 @@ The numbers come from the database for the last five minutes and from asynq Insp
 - Keys expire after 24 hours.
 - The API writes the idempotency row and the notification in one transaction. The idempotency row stores `resource_id`.
 - After commit, the API enqueues the task and updates the key to `completed` with the response.
-- An `in_progress` row older than 60 seconds is abandoned. A retry with the same key reclaims it, reads `resource_id`, returns the current notification, and marks the key completed.
+- An `in_progress` row older than 60 seconds is abandoned. A retry with the same key reclaims it, reads `resource_id`, returns the current resource, and marks the key completed. For `POST /notifications` the shape is the notification object; for `POST /notifications/batch` it is the batch summary (`batch_id`, `total`, `status`, `status_url`).
 - Without a key, two requests create two distinct notifications with different IDs. The worker guard only prevents repeated work for the same notification ID; it cannot deduplicate separate notifications.
 
 ## 12. OpenAPI and Swagger

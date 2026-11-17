@@ -69,7 +69,7 @@ The stack exposes:
 | `http://localhost:8080/healthz` | Liveness |
 | `http://localhost:8080/readyz` | PostgreSQL and Redis readiness |
 
-The demo `PROVIDER_BASE_URL` in `.env.example` points to webhook.site and expires after seven days. Create a fresh URL and replace the value before a long-lived demo.
+The `PROVIDER_BASE_URL` in `.env.example` is a placeholder. Create your own URL at webhook.site, configure it to return `202` with the provider response body, and replace the value before running the demo. The URL is public and anonymous URLs expire after seven days.
 
 ## API examples
 
@@ -103,15 +103,18 @@ curl -s -X POST http://localhost:8080/api/v1/notifications/batch \
 Check status:
 
 ```bash
-curl -s http://localhost:8080/api/v1/notifications/<notification-id>
-curl -s http://localhost:8080/api/v1/batches/<batch-id>
+export NOTIFICATION_ID="<notification-id>"
+export BATCH_ID="<batch-id>"
+
+curl -s "http://localhost:8080/api/v1/notifications/${NOTIFICATION_ID}"
+curl -s "http://localhost:8080/api/v1/batches/${BATCH_ID}"
 curl -s 'http://localhost:8080/api/v1/notifications?status=accepted&channel=sms&page=1&page_size=20'
 ```
 
 Cancel a pending notification:
 
 ```bash
-curl -s -X POST http://localhost:8080/api/v1/notifications/<notification-id>/cancel
+curl -s -X POST "http://localhost:8080/api/v1/notifications/${NOTIFICATION_ID}/cancel"
 ```
 
 ## Testing

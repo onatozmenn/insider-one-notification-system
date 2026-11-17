@@ -31,21 +31,21 @@ The task ID is the notification ID. The task is unique while it is queued (24-ho
 ## 3. Worker lifecycle
 
 1. Dequeue a task.
-2. Claim the row with a guarded update. It accepts `pending`, `queued`, a due `scheduled`, or a stale `processing` row and moves it to `processing`. The same update increments `attempt_count` and sets `updated_at`.
-3. If no row changes, stop. Another worker, a cancellation, or a terminal state won.
-4. Wait for a channel token from the rate limiter.
-5. Re-check the status. If it is `cancelled`, stop.
+2. Read the row status without claiming. If it is terminal or `cancelled`, stop.
+3. Wait for a channel token from the rate limiter. The row stays `queued` during this wait, so the processing lease is not running.
+4. Claim the row with a guarded update. It accepts `pending`, `queued`, a due `scheduled`, or a stale `processing` row and moves it to `processing`. The same update increments `attempt_count` and sets `updated_at`.
+5. If no row changes, stop. Another worker, a cancellation, or a terminal state won.
 6. Call the provider with a 10-second timeout.
 7. Record the result:
    - `202`: `processing` to `accepted`.
    - Transient error with retries left: `processing` to `queued`, set `next_attempt_at`.
    - Permanent error: `processing` to `failed`.
-   - Last attempt: `processing` to `dead_letter`.
+   - Last attempt with a transient error: `processing` to `dead_letter`.
 8. Insert a `notification_events` row in the same transaction as the status update.
 9. Publish the event to Redis pub/sub for WebSocket clients.
 10. Acknowledge the task.
 
-`attempt_count` counts every provider attempt, including success and permanent failure. It increments at claim time, not only on retries.
+`attempt_count` counts every provider attempt, including success and permanent failure. It increments at claim time, after the rate-limit wait, not only on retries.
 
 When a retry is scheduled, the worker returns an error. asynq retries the task with the configured delay. The database status is `queued`, which matches the fact that the task is waiting in Redis.
 

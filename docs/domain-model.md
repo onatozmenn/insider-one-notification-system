@@ -50,6 +50,7 @@ erDiagram
         text key PK
         text request_hash
         text state
+        uuid resource_id
         int response_status
         jsonb response_body
         timestamptz created_at

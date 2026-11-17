@@ -80,8 +80,8 @@ sequenceDiagram
     A->>DB: pending -> queued
     A-->>C: 202 Accepted
     W->>R: dequeue task
-    W->>DB: claim pending / queued / due scheduled -> processing
     W->>R: wait for channel token
+    W->>DB: claim pending / queued / due scheduled -> processing
     W->>P: POST /{uuid}
     P-->>W: 202 accepted
     W->>DB: processing -> accepted
@@ -159,7 +159,7 @@ Redis is treated as disposable. If it is flushed, the reconciler re-enqueues `pe
 | Failure | Effect | Recovery |
 | --- | --- | --- |
 | Provider is down or slow | Worker retries with backoff; queue depth grows | Provider recovers; tasks drain |
-| Provider returns 4xx | Notification moves to `failed` | Operator fixes payload or recipient |
+| Provider returns a non-retryable 4xx | Notification moves to `failed` | Operator fixes payload or recipient |
 | Retries exhausted | Notification moves to `dead_letter` | Inspect, fix, manual retry (bonus) |
 | Redis is down | API can persist but cannot enqueue; readiness fails | Redis returns; reconciler enqueues pending rows |
 | PostgreSQL is down | API returns 503; worker cannot update state | PostgreSQL returns; in-flight tasks retry |

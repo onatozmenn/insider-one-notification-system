@@ -18,7 +18,7 @@ Strict priority is easy but starves `low` during a sustained burst. A single FIF
 
 - Use three asynq queues with weights: `high` 6, `normal` 3, `low` 1.
 - Use `redis_rate` (GCRA) with one key per channel: 100 requests/second, burst 1.
-- Workers wait for a token instead of dropping work.
+- Workers wait for a token instead of dropping work. The token wait happens before the row is claimed, so the `processing` lease only covers the provider call.
 - Record `rate_limit_wait_seconds` per channel.
 - Set the worker task timeout high enough to absorb a long wait (10 minutes).
 

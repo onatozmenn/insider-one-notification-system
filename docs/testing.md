@@ -24,6 +24,7 @@ Packages and cases:
   - Batch size 0, 1, 1000, 1001.
   - Scheduled time in the past and too far ahead.
   - Template variables present, missing, and extra.
+  - Idempotency key replay, in-progress recovery, and conflict decisions.
 - `internal/delivery`:
   - Status code classification: 202, 400, 408, 425, 429, 500, 503.
   - Network error classification.
@@ -31,6 +32,7 @@ Packages and cases:
   - `Retry-After` parsing.
   - Max attempts.
   - Queue selection by priority.
+  - Rate limiter wait and cancellation decisions with a fake limiter.
 - `internal/template`:
   - Simple substitution.
   - Missing variable.

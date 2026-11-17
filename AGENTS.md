@@ -120,8 +120,8 @@ The API and worker run from the same image with different commands. This is stil
 
 1. API validates the request and writes the notification plus a status event in one transaction.
 2. API enqueues an asynq task with the notification ID and correlation ID.
-3. Worker claims the row with a guarded update. It accepts `pending`, `queued`, a due `scheduled`, or a stale `processing` row and moves it to `processing`.
-4. Worker waits for the per-channel rate limiter.
+3. Worker waits for the per-channel rate limiter. The row stays `queued` during this wait.
+4. Worker claims the row with a guarded update. It accepts `pending`, `queued`, a due `scheduled`, or a stale `processing` row and moves it to `processing`.
 5. Worker calls the provider.
 6. Worker records the result, schedules a retry, or marks a terminal state.
 7. API serves status. WebSocket publishes the new state when enabled.
@@ -177,7 +177,7 @@ Every choice is mature and boring. The assessment is about design and reliabilit
 - `processing` to `accepted` on provider 202.
 - `processing` to `queued` on a transient error with retries left.
 - `processing` to `failed` on a permanent error.
-- `processing` to `dead_letter` when retries are exhausted.
+- `processing` to `dead_letter` when the last attempt fails with a transient error.
 - Every transition is a guarded SQL update. If zero rows change, the worker stops.
 - `attempt_count` increments on every provider attempt, including successful and permanent outcomes.
 - A `processing` row whose lease has expired can be reclaimed by a retried task. The lease is longer than the provider timeout.

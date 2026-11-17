@@ -158,9 +158,9 @@ go run ./cmd/worker
 For host runs, set:
 
 ```bash
-DATABASE_URL=postgres://postgres:postgres@localhost:5433/notifications?sslmode=disable
-REDIS_ADDR=localhost:6379
-PROVIDER_BASE_URL=https://webhook.site/<your-uuid>
+export DATABASE_URL=postgres://postgres:postgres@localhost:5433/notifications?sslmode=disable
+export REDIS_ADDR=localhost:6379
+export PROVIDER_BASE_URL=https://webhook.site/<your-uuid>
 ```
 
 ## 9. Runbook
@@ -187,7 +187,7 @@ LIMIT 50;
 
 2. Inspect the provider response in the logs by `notification_id`.
 3. Fix the cause: bad recipient, provider outage, invalid payload.
-4. Retry with `POST /api/v1/notifications/{id}/retry` (bonus) or update the row and enqueue a task.
+4. Retry with `POST /api/v1/notifications/{id}/retry` (bonus). If you retry manually, set the row to `pending`, reset `attempt_count` to 0, clear `last_error`, and enqueue a fresh task ID. Do not reuse the archived task ID; the reconciler only scans `pending` rows.
 
 ### Provider errors
 
