@@ -12,9 +12,9 @@
 - M0 complete.
 - M1 complete, including OpenAPI and Swagger UI.
 - M2 complete.
-- M3: idempotency, cancellation races, failure injection, and stale claims are implemented. Repository integration tests are next.
+- M3 complete: idempotency, cancellation races, failure injection, stale claims, and repository integration tests are implemented.
 - M4 complete.
-- M5 in progress: Compose, README, unit/contract tests, CI, OpenAPI validation, and the v1.0.0 release are in place. Repository integration tests and a Compose smoke target are still pending.
+- M5 complete: Compose, README, unit/integration tests, CI, OpenAPI validation, and the v1.0.0 release are in place. `make test` runs unit, integration, and coverage; `make smoke` checks the composed stack.
 - M6 complete: scheduled notifications, templates, WebSocket updates, distributed tracing, dead-letter retry, the k6 load test, and the Prometheus/Grafana profile are implemented.
 
 ## 2. Milestones

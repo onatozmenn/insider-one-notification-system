@@ -9,10 +9,10 @@ The test suite has five layers. Each layer has a clear job; we do not duplicate 
 | Unit | Pure rules: validation, state transitions, backoff, queue selection, template rendering. | Milliseconds | Implemented |
 | Contract | Provider adapter behaviour against a controlled HTTP server. | Milliseconds | Implemented |
 | Realtime | WebSocket handshake, snapshot frame, live status frame. | Milliseconds | Implemented |
-| Integration | Repositories, worker pipeline, and migrations with real PostgreSQL and Redis. | Seconds | Next |
-| Smoke | The composed stack accepts a notification and reaches the provider. | Tens of seconds | Next |
+| Integration | Repositories, migrations, queue, reconciler, and Redis pub/sub with real services. | Seconds | Implemented |
+| Smoke | The composed stack creates and accepts a notification and a batch. | Tens of seconds | Implemented |
 
-The current suite covers unit, provider contract, worker, service, API handler, WebSocket, and tracing endpoint tests. Repository integration tests and the Compose smoke target are the next milestone.
+The current suite covers unit, provider contract, worker, service, API handler, WebSocket, tracing endpoint, repository, queue, reconciler, and Redis pub/sub tests. Repository integration tests and the Compose smoke target run with one command.
 
 ## 2. Unit tests
 
@@ -51,45 +51,39 @@ Packages and cases:
 
 Use table-driven tests. Use `t.Parallel()` where the code has no shared state.
 
-## 3. Integration tests (next)
+## 3. Integration tests
 
-The target integration coverage uses real PostgreSQL and Redis. It does not mock the database. This layer is not implemented yet.
+Integration tests use real PostgreSQL and Redis. They are behind the `integration` build tag so `go test ./...` stays fast and dependency-free.
 
-- `internal/notification/repository_test.go`:
-  - Insert and read a notification.
-  - Guarded transitions affect exactly one row.
+- `internal/notification/repository_integration_test.go`:
+  - Insert and read a notification, with its first event.
+  - Guarded transitions affect exactly one row and reject stale writes.
   - List filters, ordering, pagination, and total count.
-  - Batch insert is atomic.
-  - Idempotency row conflict behaviour.
-- `internal/api`:
-  - `httptest` server with the real router.
-  - Create, get, list, cancel, batch.
-  - Error shapes and status codes.
-  - Request ID echo.
-  - Idempotent replay and conflict.
-- `internal/delivery`:
-  - Enqueue and consume with a fake provider.
-  - Retry path with a provider that fails twice then succeeds.
-  - Dead-letter path with a permanent failure.
-  - Cancellation before the provider call.
-  - Rate limiter shared across two consumers.
-- `migrations`:
-  - Up from an empty database.
-  - Down and up again.
-  - Constraints reject invalid rows.
+  - Batch insert and rollback when one item fails.
+  - Idempotency key conflict behaviour.
+  - Templates, duplicate names, and the email-subject database constraint.
+  - Retry and cancellation guards.
+- `internal/delivery/delivery_integration_test.go`:
+  - Manual retries are not collapsed by the asynq uniqueness lock.
+  - The reconciler enqueues an old `pending` row and marks it `queued`.
+  - Queue depth polling.
+  - Worker start and shutdown against Redis.
+- `internal/realtime/hub_integration_test.go`:
+  - A published Redis event reaches the WebSocket hub subscriber.
 
 Isolation:
 
-- Each test gets a unique schema or database.
-- `t.Cleanup` drops it.
-- Redis keys use a test prefix and are deleted after the test.
+- Each test package creates its own PostgreSQL database and Redis instance in `TestMain`, so packages can run in parallel.
+- Migrations run from the embedded `migrations.FS`.
+- Every test truncates the application tables and flushes Redis before it runs.
 - No test depends on execution order.
 
 Dependencies:
 
-- Locally: `testcontainers-go` starts PostgreSQL and Redis.
-- In CI: service containers are provided and the test reads `TEST_DATABASE_URL` and `TEST_REDIS_URL`.
-- If the environment variables are absent, the test helper falls back to testcontainers.
+- Locally: `testcontainers-go` starts `postgres:16-alpine` and `redis:7-alpine`.
+- In CI: service containers are provided; the helper reads `TEST_DATABASE_URL` and `TEST_REDIS_ADDR`.
+- If the environment variables are absent, the helper falls back to testcontainers.
+- Docker must be running for local integration tests.
 
 ## 4. Contract tests
 
@@ -106,35 +100,44 @@ The provider adapter is tested with `httptest.Server`:
 
 The real webhook.site endpoint is never used in tests. It is a demo dependency, not a test dependency.
 
-## 5. Smoke test (next)
+## 5. Smoke test
 
-The planned smoke target runs against the composed stack and overrides `PROVIDER_BASE_URL` with a local mock provider, so it never depends on the expiring webhook.site URL. Until it lands, use [demo.md](demo.md) for the manual walkthrough.
+`make smoke` runs `scripts/smoke` against a running stack. It expects a working provider endpoint: webhook.site or a local mock. Set `BASE_URL` when the gateway is not on `http://localhost:8080`.
 
 1. Wait for `/readyz`.
 2. Create one SMS notification.
 3. Poll `GET /notifications/{id}` until `accepted` or timeout.
-4. Create a batch of 10.
-5. Poll the batch summary until all notifications are terminal.
-6. Assert the queue drains and `/stats` returns numbers.
+4. Create a batch of three.
+5. Poll the batch summary until `completed` and all three are accepted.
+6. Call `/api/v1/stats` and require `200` with counts.
 
-The script fails with a non-zero exit code and prints the last status and logs on failure.
+The command exits non-zero and prints the failing status on error. The smoke target is not part of CI because it needs the composed stack; the unit and integration layers cover the same code paths in CI.
 
 ## 6. Commands
 
-The unit targets are available now. Integration and smoke targets are still in progress.
+`make test` runs unit, integration, and coverage. Docker must be running for the integration tests if `TEST_DATABASE_URL` and `TEST_REDIS_ADDR` are not set.
 
 ```bash
-# Everything currently implemented
+# Unit, integration, and coverage
 make test
 
 # Unit only
 make test-unit
 
-# Race detector
-go test -race ./...
+# Integration only (testcontainers locally)
+make test-integration
+
+# Coverage for the domain packages, including integration tests
+make coverage
+
+# Race detector for everything
+go test -race -tags=integration ./...
 
 # One package
-go test ./internal/notification/...
+go test -tags=integration ./internal/notification/...
+
+# Smoke a running stack
+BASE_URL=http://localhost:8080 make smoke
 
 # OpenAPI lint
 make openapi-lint
@@ -147,29 +150,35 @@ Without Make:
 
 ```bash
 go test ./...
-go test -race ./...
+go test -race -tags=integration ./...
+go test -coverprofile=coverage.out -tags=integration ./internal/notification/... ./internal/delivery/...
+go tool cover -func=coverage.out
+BASE_URL=http://localhost:8080 go run ./scripts/smoke
 npx --yes @redocly/cli@latest lint api/openapi.yaml
 ```
 
 ## 7. CI
 
-`.github/workflows/ci.yml` runs on every push and pull request:
+`.github/workflows/ci.yml` runs on every push and pull request.
+
+The `test` job has PostgreSQL 16 and Redis 7 service containers and sets `TEST_DATABASE_URL` and `TEST_REDIS_ADDR`:
 
 1. `gofmt` check.
 2. `go vet`.
 3. `go test -race ./...`.
-4. `go build ./...`.
-5. `golangci-lint`.
-6. OpenAPI lint.
-7. Docker build for the API/worker image.
+4. `go test -race -tags=integration ./...`.
+5. Coverage for `internal/notification` and `internal/delivery`, printed to the log and uploaded as an artifact.
+6. `go build ./...`.
 
-Cache Go modules and build cache. Fail fast on formatting and lint.
+The other jobs run `golangci-lint`, OpenAPI lint, Compose validation, and the Docker build. Cache Go modules and build cache. Fail fast on formatting and lint.
 
 ## 8. Coverage
 
 - Target: 70% or more on `internal/notification` and `internal/delivery`.
+- Current local result with the integration tag: `internal/notification` 75.8%, `internal/delivery` 70.3%, combined 74.3%.
+- `make coverage` prints the per-function report and writes `coverage.out`.
 - Do not chase 100%. Generated code and `main` packages are excluded.
-- Coverage is reported locally, not enforced as a hard gate. A missing test for a core rule is a review blocker.
+- Coverage is reported, not enforced as a hard gate. A missing test for a core rule is a review blocker.
 
 ## 9. Test data
 
