@@ -86,6 +86,29 @@ func (q *Queue) Enqueue(
 	correlationID string,
 	scheduledAt *time.Time,
 ) error {
+	return q.enqueue(ctx, id.String(), id, priority, correlationID, scheduledAt, 24*time.Hour)
+}
+
+// EnqueueRetry submits a failed or dead-letter notification with a fresh task ID.
+func (q *Queue) EnqueueRetry(
+	ctx context.Context,
+	id uuid.UUID,
+	priority notification.Priority,
+	correlationID string,
+) error {
+	taskID := fmt.Sprintf("%s:retry:%d", id, time.Now().UnixNano())
+	return q.enqueue(ctx, taskID, id, priority, correlationID, nil, time.Minute)
+}
+
+func (q *Queue) enqueue(
+	ctx context.Context,
+	taskID string,
+	id uuid.UUID,
+	priority notification.Priority,
+	correlationID string,
+	scheduledAt *time.Time,
+	uniqueTTL time.Duration,
+) error {
 	payload, err := json.Marshal(TaskPayload{
 		NotificationID: id.String(),
 		CorrelationID:  correlationID,
@@ -95,11 +118,13 @@ func (q *Queue) Enqueue(
 	}
 
 	options := []asynq.Option{
-		asynq.TaskID(id.String()),
-		asynq.Unique(24 * time.Hour),
+		asynq.TaskID(taskID),
 		asynq.Queue(queueForPriority(priority)),
 		asynq.MaxRetry(q.maxRetries),
 		asynq.Timeout(10 * time.Minute),
+	}
+	if uniqueTTL > 0 {
+		options = append(options, asynq.Unique(uniqueTTL))
 	}
 	if scheduledAt != nil {
 		options = append(options, asynq.ProcessAt(*scheduledAt))

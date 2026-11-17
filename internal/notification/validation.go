@@ -104,8 +104,8 @@ func ValidateCreate(input CreateInput, now time.Time) (CreateInput, error) {
 		}
 	}
 
-	if input.Template != "" || len(input.Variables) > 0 {
-		errs = append(errs, FieldError{Field: "template", Reason: "templates are not enabled in the MVP"})
+	if input.Template == "" && len(input.Variables) > 0 {
+		errs = append(errs, FieldError{Field: "variables", Reason: "require a template"})
 	}
 
 	if len(errs) > 0 {

@@ -24,12 +24,18 @@ type Store interface {
 	GetBatch(ctx context.Context, id uuid.UUID) (*Batch, error)
 	GetIdempotency(ctx context.Context, scope, key string) (*IdempotencyRecord, error)
 	MarkQueued(ctx context.Context, id uuid.UUID) (*Notification, error)
+	Retry(ctx context.Context, id uuid.UUID) (*Notification, error)
 	Stats(ctx context.Context, since time.Time) (Stats, error)
+	CreateTemplate(ctx context.Context, template *Template) (*Template, error)
+	GetTemplate(ctx context.Context, id uuid.UUID) (*Template, error)
+	GetTemplateByName(ctx context.Context, name string) (*Template, error)
+	ListTemplates(ctx context.Context) ([]Template, error)
 }
 
 // Enqueuer submits a persisted notification to the delivery queue.
 type Enqueuer interface {
 	Enqueue(ctx context.Context, id uuid.UUID, priority Priority, correlationID string, scheduledAt *time.Time) error
+	EnqueueRetry(ctx context.Context, id uuid.UUID, priority Priority, correlationID string) error
 }
 
 var _ Store = (*Repository)(nil)
@@ -82,6 +88,26 @@ func (s *Service) Create(
 	correlationID string,
 ) (*Notification, bool, error) {
 	now := s.now().UTC()
+
+	if input.Template != "" {
+		template, err := s.store.GetTemplateByName(ctx, input.Template)
+		if errors.Is(err, ErrTemplateNotFound) {
+			return nil, false, ErrTemplateNotFound
+		}
+		if err != nil {
+			return nil, false, err
+		}
+
+		rendered, err := RenderTemplate(*template, input.Variables)
+		if err != nil {
+			return nil, false, err
+		}
+
+		input.Subject = rendered.Subject
+		input.Content = rendered.Content
+		input.Template = ""
+		input.Variables = nil
+	}
 
 	validated, err := ValidateCreate(input, now)
 	if err != nil {
@@ -270,6 +296,35 @@ func (s *Service) Cancel(ctx context.Context, id uuid.UUID) (*Notification, erro
 	return s.store.Cancel(ctx, id)
 }
 
+// Retry resets a failed or dead-letter notification and enqueues a fresh task.
+func (s *Service) Retry(ctx context.Context, id uuid.UUID) (*Notification, error) {
+	n, err := s.store.Retry(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if s.enqueuer == nil {
+		return n, nil
+	}
+
+	if err := s.enqueuer.EnqueueRetry(ctx, n.ID, n.Priority, n.CorrelationID); err != nil {
+		s.logger.Warn("retry enqueue failed; reconciler will retry",
+			"notification_id", n.ID,
+			"error", err,
+		)
+		return n, nil
+	}
+
+	queued, err := s.store.MarkQueued(ctx, n.ID)
+	if err != nil {
+		s.logger.Warn("failed to mark retried notification queued",
+			"notification_id", n.ID,
+			"error", err,
+		)
+		return n, nil
+	}
+	return queued, nil
+}
+
 // GetBatch returns a batch summary.
 func (s *Service) GetBatch(ctx context.Context, id uuid.UUID) (*Batch, error) {
 	return s.store.GetBatch(ctx, id)
@@ -278,6 +333,42 @@ func (s *Service) GetBatch(ctx context.Context, id uuid.UUID) (*Batch, error) {
 // Stats returns delivery counts and latency since the cutoff.
 func (s *Service) Stats(ctx context.Context, since time.Time) (Stats, error) {
 	return s.store.Stats(ctx, since)
+}
+
+// CreateTemplate validates and persists a reusable template.
+func (s *Service) CreateTemplate(ctx context.Context, input TemplateInput) (*Template, error) {
+	validated, err := ValidateTemplate(input)
+	if err != nil {
+		return nil, err
+	}
+
+	id, err := uuid.NewV7()
+	if err != nil {
+		return nil, fmt.Errorf("generate template id: %w", err)
+	}
+
+	now := s.now().UTC()
+	template := &Template{
+		ID:        id,
+		Name:      validated.Name,
+		Channel:   validated.Channel,
+		Subject:   stringPointer(validated.Subject),
+		Content:   validated.Content,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	return s.store.CreateTemplate(ctx, template)
+}
+
+// GetTemplate returns one template.
+func (s *Service) GetTemplate(ctx context.Context, id uuid.UUID) (*Template, error) {
+	return s.store.GetTemplate(ctx, id)
+}
+
+// ListTemplates returns all templates.
+func (s *Service) ListTemplates(ctx context.Context) ([]Template, error) {
+	return s.store.ListTemplates(ctx)
 }
 
 func (s *Service) enqueueSingle(ctx context.Context, n *Notification) (*Notification, bool, error) {

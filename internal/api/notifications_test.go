@@ -19,13 +19,17 @@ import (
 var testNotificationID = uuid.MustParse("0193b2f4-7c1a-7d3e-9a10-5f8c2d6e4b71")
 
 type fakeNotificationService struct {
-	createFn      func(context.Context, notification.CreateInput, string, string) (*notification.Notification, bool, error)
-	createBatchFn func(context.Context, notification.BatchInput, string, string) (*notification.Batch, bool, error)
-	getFn         func(context.Context, uuid.UUID) (*notification.Notification, error)
-	listFn        func(context.Context, notification.ListFilter) ([]notification.Notification, int, error)
-	cancelFn      func(context.Context, uuid.UUID) (*notification.Notification, error)
-	getBatchFn    func(context.Context, uuid.UUID) (*notification.Batch, error)
-	statsFn       func(context.Context, time.Time) (notification.Stats, error)
+	createFn         func(context.Context, notification.CreateInput, string, string) (*notification.Notification, bool, error)
+	createBatchFn    func(context.Context, notification.BatchInput, string, string) (*notification.Batch, bool, error)
+	getFn            func(context.Context, uuid.UUID) (*notification.Notification, error)
+	listFn           func(context.Context, notification.ListFilter) ([]notification.Notification, int, error)
+	cancelFn         func(context.Context, uuid.UUID) (*notification.Notification, error)
+	retryFn          func(context.Context, uuid.UUID) (*notification.Notification, error)
+	getBatchFn       func(context.Context, uuid.UUID) (*notification.Batch, error)
+	statsFn          func(context.Context, time.Time) (notification.Stats, error)
+	createTemplateFn func(context.Context, notification.TemplateInput) (*notification.Template, error)
+	getTemplateFn    func(context.Context, uuid.UUID) (*notification.Template, error)
+	listTemplatesFn  func(context.Context) ([]notification.Template, error)
 }
 
 func (f *fakeNotificationService) Create(
@@ -76,6 +80,13 @@ func (f *fakeNotificationService) Cancel(ctx context.Context, id uuid.UUID) (*no
 	return f.cancelFn(ctx, id)
 }
 
+func (f *fakeNotificationService) Retry(ctx context.Context, id uuid.UUID) (*notification.Notification, error) {
+	if f.retryFn == nil {
+		return nil, errors.New("unexpected Retry call")
+	}
+	return f.retryFn(ctx, id)
+}
+
 func (f *fakeNotificationService) GetBatch(ctx context.Context, id uuid.UUID) (*notification.Batch, error) {
 	if f.getBatchFn == nil {
 		return nil, errors.New("unexpected GetBatch call")
@@ -88,6 +99,27 @@ func (f *fakeNotificationService) Stats(ctx context.Context, since time.Time) (n
 		return notification.Stats{}, errors.New("unexpected Stats call")
 	}
 	return f.statsFn(ctx, since)
+}
+
+func (f *fakeNotificationService) CreateTemplate(ctx context.Context, input notification.TemplateInput) (*notification.Template, error) {
+	if f.createTemplateFn == nil {
+		return nil, errors.New("unexpected CreateTemplate call")
+	}
+	return f.createTemplateFn(ctx, input)
+}
+
+func (f *fakeNotificationService) GetTemplate(ctx context.Context, id uuid.UUID) (*notification.Template, error) {
+	if f.getTemplateFn == nil {
+		return nil, errors.New("unexpected GetTemplate call")
+	}
+	return f.getTemplateFn(ctx, id)
+}
+
+func (f *fakeNotificationService) ListTemplates(ctx context.Context) ([]notification.Template, error) {
+	if f.listTemplatesFn == nil {
+		return nil, errors.New("unexpected ListTemplates call")
+	}
+	return f.listTemplatesFn(ctx)
 }
 
 func testRouter(service NotificationService) http.Handler {
@@ -237,6 +269,39 @@ func (f fakeQueueDepth) Depth(context.Context) map[string]int {
 	return f.depth
 }
 
+func TestRetryNotification(t *testing.T) {
+	service := &fakeNotificationService{
+		retryFn: func(_ context.Context, id uuid.UUID) (*notification.Notification, error) {
+			return &notification.Notification{ID: id, Status: notification.StatusQueued}, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/"+testNotificationID.String()+"/retry", nil)
+	rec := httptest.NewRecorder()
+
+	testRouter(service).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Equal(t, "/api/v1/notifications/"+testNotificationID.String(), rec.Header().Get("Location"))
+	assert.Contains(t, rec.Body.String(), `"status":"queued"`)
+}
+
+func TestRetryNotificationConflict(t *testing.T) {
+	service := &fakeNotificationService{
+		retryFn: func(context.Context, uuid.UUID) (*notification.Notification, error) {
+			return nil, notification.ErrNotRetryable
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/"+testNotificationID.String()+"/retry", nil)
+	rec := httptest.NewRecorder()
+
+	testRouter(service).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"code":"not_retryable"`)
+}
+
 func TestStats(t *testing.T) {
 	service := &fakeNotificationService{
 		statsFn: func(context.Context, time.Time) (notification.Stats, error) {
@@ -267,6 +332,84 @@ func TestStats(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"window":"5m"`)
 	assert.Contains(t, rec.Body.String(), `"high":3`)
 	assert.Contains(t, rec.Body.String(), `"success_rate":0.9`)
+}
+
+func TestCreateTemplate(t *testing.T) {
+	service := &fakeNotificationService{
+		createTemplateFn: func(_ context.Context, input notification.TemplateInput) (*notification.Template, error) {
+			require.Equal(t, "welcome", input.Name)
+			require.Equal(t, notification.ChannelSMS, input.Channel)
+			return &notification.Template{
+				ID:      testNotificationID,
+				Name:    "welcome",
+				Channel: notification.ChannelSMS,
+				Content: "Hello",
+			}, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates",
+		strings.NewReader(`{"name":"welcome","channel":"sms","content":"Hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	testRouter(service).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	assert.Equal(t, "/api/v1/templates/"+testNotificationID.String(), rec.Header().Get("Location"))
+	assert.Contains(t, rec.Body.String(), `"name":"welcome"`)
+}
+
+func TestListTemplates(t *testing.T) {
+	service := &fakeNotificationService{
+		listTemplatesFn: func(context.Context) ([]notification.Template, error) {
+			return []notification.Template{
+				{ID: testNotificationID, Name: "welcome", Channel: notification.ChannelSMS, Content: "Hello"},
+			}, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/templates", nil)
+	rec := httptest.NewRecorder()
+
+	testRouter(service).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"name":"welcome"`)
+}
+
+func TestGetTemplate(t *testing.T) {
+	service := &fakeNotificationService{
+		getTemplateFn: func(context.Context, uuid.UUID) (*notification.Template, error) {
+			return &notification.Template{ID: testNotificationID, Name: "welcome", Channel: notification.ChannelSMS, Content: "Hello"}, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/templates/"+testNotificationID.String(), nil)
+	rec := httptest.NewRecorder()
+
+	testRouter(service).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"name":"welcome"`)
+}
+
+func TestTemplateConflict(t *testing.T) {
+	service := &fakeNotificationService{
+		createTemplateFn: func(context.Context, notification.TemplateInput) (*notification.Template, error) {
+			return nil, notification.ErrTemplateExists
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/templates",
+		strings.NewReader(`{"name":"welcome","channel":"sms","content":"Hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	testRouter(service).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"code":"template_exists"`)
 }
 
 func TestCreateBatch(t *testing.T) {

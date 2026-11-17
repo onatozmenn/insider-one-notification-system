@@ -12,15 +12,20 @@ import (
 )
 
 type fakeStore struct {
-	createFn         func(context.Context, *Notification, []byte, *IdempotencyRecord) (*Notification, error)
-	createBatchFn    func(context.Context, *Batch, []*Notification, *IdempotencyRecord) (*Batch, error)
-	getFn            func(context.Context, uuid.UUID) (*Notification, error)
-	listFn           func(context.Context, ListFilter) ([]Notification, int, error)
-	cancelFn         func(context.Context, uuid.UUID) (*Notification, error)
-	getBatchFn       func(context.Context, uuid.UUID) (*Batch, error)
-	getIdempotencyFn func(context.Context, string, string) (*IdempotencyRecord, error)
-	markQueuedFn     func(context.Context, uuid.UUID) (*Notification, error)
-	statsFn          func(context.Context, time.Time) (Stats, error)
+	createFn            func(context.Context, *Notification, []byte, *IdempotencyRecord) (*Notification, error)
+	createBatchFn       func(context.Context, *Batch, []*Notification, *IdempotencyRecord) (*Batch, error)
+	getFn               func(context.Context, uuid.UUID) (*Notification, error)
+	listFn              func(context.Context, ListFilter) ([]Notification, int, error)
+	cancelFn            func(context.Context, uuid.UUID) (*Notification, error)
+	getBatchFn          func(context.Context, uuid.UUID) (*Batch, error)
+	getIdempotencyFn    func(context.Context, string, string) (*IdempotencyRecord, error)
+	markQueuedFn        func(context.Context, uuid.UUID) (*Notification, error)
+	retryFn             func(context.Context, uuid.UUID) (*Notification, error)
+	statsFn             func(context.Context, time.Time) (Stats, error)
+	createTemplateFn    func(context.Context, *Template) (*Template, error)
+	getTemplateFn       func(context.Context, uuid.UUID) (*Template, error)
+	getTemplateByNameFn func(context.Context, string) (*Template, error)
+	listTemplatesFn     func(context.Context) ([]Template, error)
 }
 
 func (f *fakeStore) Create(ctx context.Context, n *Notification, detail []byte, idem *IdempotencyRecord) (*Notification, error) {
@@ -79,6 +84,13 @@ func (f *fakeStore) MarkQueued(ctx context.Context, id uuid.UUID) (*Notification
 	return f.markQueuedFn(ctx, id)
 }
 
+func (f *fakeStore) Retry(ctx context.Context, id uuid.UUID) (*Notification, error) {
+	if f.retryFn == nil {
+		return nil, errors.New("unexpected Retry call")
+	}
+	return f.retryFn(ctx, id)
+}
+
 func (f *fakeStore) Stats(ctx context.Context, since time.Time) (Stats, error) {
 	if f.statsFn == nil {
 		return Stats{}, nil
@@ -86,9 +98,39 @@ func (f *fakeStore) Stats(ctx context.Context, since time.Time) (Stats, error) {
 	return f.statsFn(ctx, since)
 }
 
+func (f *fakeStore) CreateTemplate(ctx context.Context, template *Template) (*Template, error) {
+	if f.createTemplateFn == nil {
+		return nil, errors.New("unexpected CreateTemplate call")
+	}
+	return f.createTemplateFn(ctx, template)
+}
+
+func (f *fakeStore) GetTemplate(ctx context.Context, id uuid.UUID) (*Template, error) {
+	if f.getTemplateFn == nil {
+		return nil, errors.New("unexpected GetTemplate call")
+	}
+	return f.getTemplateFn(ctx, id)
+}
+
+func (f *fakeStore) GetTemplateByName(ctx context.Context, name string) (*Template, error) {
+	if f.getTemplateByNameFn == nil {
+		return nil, ErrTemplateNotFound
+	}
+	return f.getTemplateByNameFn(ctx, name)
+}
+
+func (f *fakeStore) ListTemplates(ctx context.Context) ([]Template, error) {
+	if f.listTemplatesFn == nil {
+		return []Template{}, nil
+	}
+	return f.listTemplatesFn(ctx)
+}
+
 type fakeEnqueuer struct {
-	enqueueFn func(context.Context, uuid.UUID, Priority, string, *time.Time) error
-	calls     int
+	enqueueFn      func(context.Context, uuid.UUID, Priority, string, *time.Time) error
+	enqueueRetryFn func(context.Context, uuid.UUID, Priority, string) error
+	calls          int
+	retryCalls     int
 }
 
 func (f *fakeEnqueuer) Enqueue(
@@ -103,6 +145,19 @@ func (f *fakeEnqueuer) Enqueue(
 		return nil
 	}
 	return f.enqueueFn(ctx, id, priority, correlationID, scheduledAt)
+}
+
+func (f *fakeEnqueuer) EnqueueRetry(
+	ctx context.Context,
+	id uuid.UUID,
+	priority Priority,
+	correlationID string,
+) error {
+	f.retryCalls++
+	if f.enqueueRetryFn == nil {
+		return nil
+	}
+	return f.enqueueRetryFn(ctx, id, priority, correlationID)
 }
 
 func fixedNow() time.Time {
@@ -172,6 +227,128 @@ func TestServiceCreateEnqueueFailureLeavesPending(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, replayed)
 	assert.Equal(t, StatusPending, n.Status)
+}
+
+func TestServiceCreateWithTemplate(t *testing.T) {
+	template := &Template{
+		Name:    "welcome",
+		Channel: ChannelSMS,
+		Content: "Hello {{name}}",
+	}
+	var captured *Notification
+
+	store := &fakeStore{
+		getTemplateByNameFn: func(context.Context, string) (*Template, error) {
+			return template, nil
+		},
+		createFn: func(_ context.Context, n *Notification, _ []byte, _ *IdempotencyRecord) (*Notification, error) {
+			captured = n
+			return n, nil
+		},
+	}
+	service := NewService(store, 5, fixedNow)
+
+	n, replayed, err := service.Create(context.Background(), CreateInput{
+		Recipient: "+15555550100",
+		Channel:   ChannelSMS,
+		Template:  "welcome",
+		Variables: map[string]string{"name": "Onat"},
+	}, "", "req-1")
+
+	require.NoError(t, err)
+	assert.False(t, replayed)
+	require.NotNil(t, captured)
+	assert.Equal(t, "Hello Onat", n.Content)
+	assert.Equal(t, "Hello Onat", captured.Content)
+}
+
+func TestServiceCreateMissingTemplate(t *testing.T) {
+	store := &fakeStore{
+		getTemplateByNameFn: func(context.Context, string) (*Template, error) {
+			return nil, ErrTemplateNotFound
+		},
+	}
+	service := NewService(store, 5, fixedNow)
+
+	_, _, err := service.Create(context.Background(), CreateInput{
+		Recipient: "+15555550100",
+		Channel:   ChannelSMS,
+		Template:  "missing",
+	}, "", "req-1")
+
+	require.ErrorIs(t, err, ErrTemplateNotFound)
+}
+
+func TestServiceCreateTemplateMissingVariable(t *testing.T) {
+	store := &fakeStore{
+		getTemplateByNameFn: func(context.Context, string) (*Template, error) {
+			return &Template{Name: "welcome", Channel: ChannelSMS, Content: "Hello {{name}}"}, nil
+		},
+	}
+	service := NewService(store, 5, fixedNow)
+
+	_, _, err := service.Create(context.Background(), CreateInput{
+		Recipient: "+15555550100",
+		Channel:   ChannelSMS,
+		Template:  "welcome",
+	}, "", "req-1")
+
+	require.Error(t, err)
+	var validationErr *ValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Contains(t, fieldNames(validationErr), "variables.name")
+}
+
+func TestServiceRetry(t *testing.T) {
+	id := uuid.New()
+	store := &fakeStore{
+		retryFn: func(_ context.Context, id uuid.UUID) (*Notification, error) {
+			return &Notification{ID: id, Status: StatusPending, Priority: PriorityHigh, CorrelationID: "req-1"}, nil
+		},
+		markQueuedFn: func(_ context.Context, id uuid.UUID) (*Notification, error) {
+			return &Notification{ID: id, Status: StatusQueued}, nil
+		},
+	}
+	enqueuer := &fakeEnqueuer{}
+	service := NewService(store, 5, fixedNow).WithEnqueuer(enqueuer)
+
+	n, err := service.Retry(context.Background(), id)
+	require.NoError(t, err)
+	assert.Equal(t, StatusQueued, n.Status)
+	assert.Equal(t, 1, enqueuer.retryCalls)
+}
+
+func TestServiceRetryNotRetryable(t *testing.T) {
+	store := &fakeStore{
+		retryFn: func(context.Context, uuid.UUID) (*Notification, error) {
+			return nil, ErrNotRetryable
+		},
+	}
+	service := NewService(store, 5, fixedNow)
+
+	_, err := service.Retry(context.Background(), uuid.New())
+	require.ErrorIs(t, err, ErrNotRetryable)
+}
+
+func TestServiceCreateTemplate(t *testing.T) {
+	store := &fakeStore{
+		createTemplateFn: func(_ context.Context, template *Template) (*Template, error) {
+			return template, nil
+		},
+	}
+	service := NewService(store, 5, fixedNow)
+
+	template, err := service.CreateTemplate(context.Background(), TemplateInput{
+		Name:    "welcome",
+		Channel: ChannelSMS,
+		Content: "Hello",
+	})
+	require.NoError(t, err)
+	assert.NotEqual(t, uuid.Nil, template.ID)
+	assert.Equal(t, "welcome", template.Name)
+	assert.Equal(t, ChannelSMS, template.Channel)
+	assert.Nil(t, template.Subject)
+	assert.Equal(t, fixedNow(), template.CreatedAt)
 }
 
 func TestServiceCreateIdempotentReplay(t *testing.T) {
