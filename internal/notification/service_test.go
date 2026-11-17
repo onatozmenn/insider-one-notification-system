@@ -19,6 +19,7 @@ type fakeStore struct {
 	cancelFn            func(context.Context, uuid.UUID) (*Notification, error)
 	getBatchFn          func(context.Context, uuid.UUID) (*Batch, error)
 	getIdempotencyFn    func(context.Context, string, string) (*IdempotencyRecord, error)
+	deleteExpiredFn     func(context.Context) (int64, error)
 	markQueuedFn        func(context.Context, uuid.UUID) (*Notification, error)
 	retryFn             func(context.Context, uuid.UUID) (*Notification, error)
 	statsFn             func(context.Context, time.Time) (Stats, error)
@@ -75,6 +76,13 @@ func (f *fakeStore) GetIdempotency(ctx context.Context, scope, key string) (*Ide
 		return nil, ErrNotFound
 	}
 	return f.getIdempotencyFn(ctx, scope, key)
+}
+
+func (f *fakeStore) DeleteExpiredIdempotency(ctx context.Context) (int64, error) {
+	if f.deleteExpiredFn == nil {
+		return 0, nil
+	}
+	return f.deleteExpiredFn(ctx)
 }
 
 func (f *fakeStore) MarkQueued(ctx context.Context, id uuid.UUID) (*Notification, error) {

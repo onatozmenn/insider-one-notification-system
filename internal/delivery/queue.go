@@ -26,6 +26,11 @@ const (
 	QueueHigh   = "high"
 	QueueNormal = "normal"
 	QueueLow    = "low"
+
+	// TransportMaxRetries bounds asynq retries for infrastructure errors. The
+	// provider attempt budget is tracked in PostgreSQL with max_attempts, so
+	// Redis or database failures cannot consume a delivery attempt.
+	TransportMaxRetries = 100
 )
 
 // TaskPayload is the data carried by a delivery task.

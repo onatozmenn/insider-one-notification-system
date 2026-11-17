@@ -32,6 +32,7 @@ type WorkerRepository interface {
 	MarkAccepted(ctx context.Context, id uuid.UUID, providerMessageID string, now time.Time) (*notification.Notification, error)
 	MarkFailed(ctx context.Context, id uuid.UUID, message string, now time.Time) (*notification.Notification, error)
 	MarkDeadLetter(ctx context.Context, id uuid.UUID, message string, now time.Time) (*notification.Notification, error)
+	MarkExhaustedLease(ctx context.Context, id uuid.UUID, now time.Time, lease time.Duration) (*notification.Notification, error)
 	MarkQueuedForRetry(ctx context.Context, id uuid.UUID, message string, nextAttempt time.Time, now time.Time) (*notification.Notification, error)
 }
 
@@ -188,6 +189,9 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) (handleErr error)
 		if remaining := w.lease - time.Since(n.UpdatedAt); remaining > 0 {
 			return &RetryAfterError{Delay: remaining}
 		}
+		if n.AttemptCount >= n.MaxAttempts {
+			return w.finalizeExhaustedLease(ctx, n)
+		}
 	}
 
 	waitStarted := time.Now()
@@ -215,6 +219,9 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) (handleErr error)
 		if getErr == nil && current.Status == notification.StatusProcessing {
 			if remaining := w.lease - time.Since(current.UpdatedAt); remaining > 0 {
 				return &RetryAfterError{Delay: remaining, Err: err}
+			}
+			if current.AttemptCount >= current.MaxAttempts {
+				return w.finalizeExhaustedLease(ctx, current)
 			}
 		}
 		return nil
@@ -280,9 +287,29 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) (handleErr error)
 	var providerErr *provider.Error
 	if !errors.As(sendErr, &providerErr) {
 		w.metrics.ObserveProvider(string(claimed.Channel), "transient_error", duration)
+
+		if claimed.AttemptCount >= claimed.MaxAttempts {
+			w.metrics.IncStatus(string(claimed.Channel), string(notification.StatusDeadLetter))
+			w.metrics.ObserveProcessing(string(claimed.Channel), string(notification.StatusDeadLetter), time.Since(claimed.UpdatedAt))
+
+			dead, err := w.repository.MarkDeadLetter(ctx, claimed.ID, sendErr.Error(), time.Now().UTC())
+			if err != nil {
+				return fmt.Errorf("mark dead letter: %w", err)
+			}
+			w.publishStatus(ctx, dead)
+			w.logger.Warn("notification exhausted retries",
+				"request_id", claimed.CorrelationID,
+				"notification_id", claimed.ID,
+				"channel", claimed.Channel,
+				"attempt", claimed.AttemptCount,
+				"error", sendErr,
+			)
+			return nil
+		}
+
 		w.metrics.IncStatus(string(claimed.Channel), string(notification.StatusQueued))
 
-		nextAttempt := time.Now().UTC().Add(RetryDelay(retryCount(ctx), sendErr, task))
+		nextAttempt := time.Now().UTC().Add(RetryDelay(claimed.AttemptCount-1, sendErr, task))
 		retried, err := w.repository.MarkQueuedForRetry(ctx, claimed.ID, sendErr.Error(), nextAttempt, time.Now().UTC())
 		if err != nil {
 			return fmt.Errorf("mark retry: %w", err)
@@ -325,7 +352,7 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) (handleErr error)
 
 	w.metrics.ObserveProvider(string(claimed.Channel), "transient_error", duration)
 
-	if isLastAttempt(ctx) {
+	if claimed.AttemptCount >= claimed.MaxAttempts {
 		w.metrics.IncStatus(string(claimed.Channel), string(notification.StatusDeadLetter))
 		w.metrics.ObserveProcessing(string(claimed.Channel), string(notification.StatusDeadLetter), time.Since(claimed.UpdatedAt))
 
@@ -346,7 +373,7 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) (handleErr error)
 
 	w.metrics.IncStatus(string(claimed.Channel), string(notification.StatusQueued))
 
-	nextAttempt := time.Now().UTC().Add(RetryDelay(retryCount(ctx), sendErr, task))
+	nextAttempt := time.Now().UTC().Add(RetryDelay(claimed.AttemptCount-1, sendErr, task))
 	retried, err := w.repository.MarkQueuedForRetry(ctx, claimed.ID, message, nextAttempt, time.Now().UTC())
 	if err != nil {
 		return fmt.Errorf("mark retry: %w", err)
@@ -360,6 +387,26 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) (handleErr error)
 		"error", message,
 	)
 	return sendErr
+}
+
+func (w *Worker) finalizeExhaustedLease(ctx context.Context, n *notification.Notification) error {
+	dead, err := w.repository.MarkExhaustedLease(ctx, n.ID, time.Now().UTC(), w.lease)
+	if errors.Is(err, notification.ErrNotClaimable) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("mark exhausted lease: %w", err)
+	}
+
+	w.metrics.IncStatus(string(dead.Channel), string(notification.StatusDeadLetter))
+	w.metrics.ObserveProcessing(string(dead.Channel), string(notification.StatusDeadLetter), time.Since(n.UpdatedAt))
+	w.publishStatus(ctx, dead)
+	w.logger.Warn("notification dead-lettered after expired lease",
+		"notification_id", dead.ID,
+		"channel", dead.Channel,
+		"attempt", dead.AttemptCount,
+	)
+	return nil
 }
 
 func (w *Worker) publishStatus(ctx context.Context, n *notification.Notification) {
@@ -412,24 +459,4 @@ func (w *Worker) waitForToken(ctx context.Context, channel notification.Channel)
 
 func rateLimitKey(channel notification.Channel) string {
 	return "ratelimit:provider:" + string(channel)
-}
-
-func retryCount(ctx context.Context) int {
-	count, ok := asynq.GetRetryCount(ctx)
-	if !ok {
-		return 0
-	}
-	return count
-}
-
-func isLastAttempt(ctx context.Context) bool {
-	retries, ok := asynq.GetRetryCount(ctx)
-	if !ok {
-		return false
-	}
-	maxRetries, ok := asynq.GetMaxRetry(ctx)
-	if !ok {
-		return false
-	}
-	return retries >= maxRetries
 }

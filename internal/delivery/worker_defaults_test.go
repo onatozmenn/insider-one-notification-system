@@ -66,9 +66,3 @@ func TestPublishStatusLogsPublisherError(t *testing.T) {
 		Status:  notification.StatusAccepted,
 	})
 }
-
-func TestRetryHelpersWithoutTaskContext(t *testing.T) {
-	ctx := context.Background()
-	assert.Zero(t, retryCount(ctx))
-	assert.False(t, isLastAttempt(ctx))
-}

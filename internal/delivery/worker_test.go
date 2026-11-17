@@ -25,6 +25,7 @@ type fakeWorkerRepository struct {
 	markAcceptedFn       func(context.Context, uuid.UUID, string, time.Time) (*notification.Notification, error)
 	markFailedFn         func(context.Context, uuid.UUID, string, time.Time) (*notification.Notification, error)
 	markDeadLetterFn     func(context.Context, uuid.UUID, string, time.Time) (*notification.Notification, error)
+	markExhaustedLeaseFn func(context.Context, uuid.UUID, time.Time, time.Duration) (*notification.Notification, error)
 	markQueuedForRetryFn func(context.Context, uuid.UUID, string, time.Time, time.Time) (*notification.Notification, error)
 }
 
@@ -68,6 +69,13 @@ func (f *fakeWorkerRepository) MarkQueuedForRetry(ctx context.Context, id uuid.U
 		return nil, errors.New("unexpected MarkQueuedForRetry call")
 	}
 	return f.markQueuedForRetryFn(ctx, id, message, nextAttempt, now)
+}
+
+func (f *fakeWorkerRepository) MarkExhaustedLease(ctx context.Context, id uuid.UUID, now time.Time, lease time.Duration) (*notification.Notification, error) {
+	if f.markExhaustedLeaseFn == nil {
+		return nil, errors.New("unexpected MarkExhaustedLease call")
+	}
+	return f.markExhaustedLeaseFn(ctx, id, now, lease)
 }
 
 type fakeWorkerProvider struct {
@@ -124,6 +132,7 @@ func queuedNotification(id uuid.UUID) *notification.Notification {
 		Priority:      notification.PriorityHigh,
 		Status:        notification.StatusQueued,
 		CorrelationID: "req-1",
+		MaxAttempts:   5,
 	}
 }
 
@@ -136,6 +145,7 @@ func processingNotification(id uuid.UUID) *notification.Notification {
 		Priority:      notification.PriorityHigh,
 		Status:        notification.StatusProcessing,
 		AttemptCount:  1,
+		MaxAttempts:   5,
 		CorrelationID: "req-1",
 	}
 }
@@ -250,6 +260,109 @@ func TestWorkerSchedulesTransientRetry(t *testing.T) {
 
 	require.Error(t, err)
 	assert.True(t, retried)
+}
+
+func TestWorkerDeadLettersOnFinalAttempt(t *testing.T) {
+	id := uuid.New()
+	deadLettered := false
+
+	repository := &fakeWorkerRepository{
+		getFn: func(context.Context, uuid.UUID) (*notification.Notification, error) {
+			return queuedNotification(id), nil
+		},
+		claimFn: func(context.Context, uuid.UUID, time.Time, time.Duration) (*notification.Notification, error) {
+			n := processingNotification(id)
+			n.AttemptCount = n.MaxAttempts
+			return n, nil
+		},
+		markDeadLetterFn: func(_ context.Context, _ uuid.UUID, message string, _ time.Time) (*notification.Notification, error) {
+			deadLettered = true
+			assert.Equal(t, "provider returned 500", message)
+			return &notification.Notification{
+				ID:           id,
+				Channel:      notification.ChannelSMS,
+				Status:       notification.StatusDeadLetter,
+				AttemptCount: 5,
+			}, nil
+		},
+	}
+	providerClient := &fakeWorkerProvider{
+		sendFn: func(context.Context, provider.Message) (provider.Result, error) {
+			return provider.Result{}, &provider.Error{Transient: true, Message: "provider returned 500", StatusCode: 500}
+		},
+	}
+
+	worker := testWorker(repository, providerClient, &fakeWorkerLimiter{})
+	err := worker.handle(context.Background(), testTask(t, id))
+
+	require.NoError(t, err)
+	assert.True(t, deadLettered)
+}
+
+func TestWorkerDeadLettersOnFinalUnknownError(t *testing.T) {
+	id := uuid.New()
+	deadLettered := false
+
+	repository := &fakeWorkerRepository{
+		getFn: func(context.Context, uuid.UUID) (*notification.Notification, error) {
+			return queuedNotification(id), nil
+		},
+		claimFn: func(context.Context, uuid.UUID, time.Time, time.Duration) (*notification.Notification, error) {
+			n := processingNotification(id)
+			n.AttemptCount = n.MaxAttempts
+			return n, nil
+		},
+		markDeadLetterFn: func(_ context.Context, _ uuid.UUID, message string, _ time.Time) (*notification.Notification, error) {
+			deadLettered = true
+			assert.Equal(t, "network unavailable", message)
+			return &notification.Notification{
+				ID:           id,
+				Channel:      notification.ChannelSMS,
+				Status:       notification.StatusDeadLetter,
+				AttemptCount: 5,
+			}, nil
+		},
+	}
+	providerClient := &fakeWorkerProvider{
+		sendFn: func(context.Context, provider.Message) (provider.Result, error) {
+			return provider.Result{}, errors.New("network unavailable")
+		},
+	}
+
+	worker := testWorker(repository, providerClient, &fakeWorkerLimiter{})
+	err := worker.handle(context.Background(), testTask(t, id))
+
+	require.NoError(t, err)
+	assert.True(t, deadLettered)
+}
+
+func TestWorkerFinalizesStaleExhaustedLease(t *testing.T) {
+	id := uuid.New()
+	finalized := false
+
+	repository := &fakeWorkerRepository{
+		getFn: func(context.Context, uuid.UUID) (*notification.Notification, error) {
+			n := processingNotification(id)
+			n.AttemptCount = n.MaxAttempts
+			n.UpdatedAt = time.Now().Add(-3 * time.Minute)
+			return n, nil
+		},
+		markExhaustedLeaseFn: func(_ context.Context, _ uuid.UUID, _ time.Time, _ time.Duration) (*notification.Notification, error) {
+			finalized = true
+			return &notification.Notification{
+				ID:           id,
+				Channel:      notification.ChannelSMS,
+				Status:       notification.StatusDeadLetter,
+				AttemptCount: 5,
+			}, nil
+		},
+	}
+
+	worker := testWorker(repository, &fakeWorkerProvider{}, &fakeWorkerLimiter{})
+	err := worker.handle(context.Background(), testTask(t, id))
+
+	require.NoError(t, err)
+	assert.True(t, finalized)
 }
 
 func TestWorkerWaitsForRateLimit(t *testing.T) {

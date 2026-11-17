@@ -412,6 +412,13 @@ func (r *Repository) GetIdempotency(ctx context.Context, scope, key string) (*Id
 		&resourceID, &responseStatus, &record.CreatedAt, &record.ExpiresAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
+		// An expired row still owns the primary key. Remove it so the key can
+		// be reused after the TTL.
+		_, _ = r.db.Exec(ctx,
+			`DELETE FROM idempotency_keys
+			 WHERE scope = $1 AND key = $2 AND expires_at <= now()`,
+			scope, key,
+		)
 		return nil, ErrNotFound
 	}
 	if err != nil {
@@ -427,6 +434,15 @@ func (r *Repository) GetIdempotency(ctx context.Context, scope, key string) (*Id
 	}
 
 	return &record, nil
+}
+
+// DeleteExpiredIdempotency removes keys whose TTL has elapsed.
+func (r *Repository) DeleteExpiredIdempotency(ctx context.Context) (int64, error) {
+	tag, err := r.db.Exec(ctx, `DELETE FROM idempotency_keys WHERE expires_at <= now()`)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired idempotency keys: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // CreateTemplate inserts a reusable message template.
@@ -519,8 +535,16 @@ func (r *Repository) MarkQueued(ctx context.Context, id uuid.UUID) (*Notificatio
 	return n, err
 }
 
-// ListPending returns pending rows older than the cutoff.
-func (r *Repository) ListPending(ctx context.Context, olderThan time.Time, limit int) ([]Notification, error) {
+// ListReconcilable returns rows whose queue task may be missing: pending rows
+// older than the cutoff, scheduled rows that are due, and queued rows that have
+// not advanced for the queued cutoff.
+func (r *Repository) ListReconcilable(
+	ctx context.Context,
+	pendingBefore time.Time,
+	scheduledBefore time.Time,
+	queuedBefore time.Time,
+	limit int,
+) ([]Notification, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -528,13 +552,15 @@ func (r *Repository) ListPending(ctx context.Context, olderThan time.Time, limit
 	rows, err := r.db.Query(ctx,
 		`SELECT `+notificationColumns+`
 		 FROM notifications
-		 WHERE status = 'pending' AND created_at < $1
+		 WHERE (status = 'pending' AND created_at < $1)
+		    OR (status = 'scheduled' AND scheduled_at <= $2)
+		    OR (status = 'queued' AND updated_at < $3)
 		 ORDER BY created_at
-		 LIMIT $2`,
-		olderThan, limit,
+		 LIMIT $4`,
+		pendingBefore, scheduledBefore, queuedBefore, limit,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("list pending notifications: %w", err)
+		return nil, fmt.Errorf("list reconcilable notifications: %w", err)
 	}
 	defer rows.Close()
 
@@ -542,12 +568,12 @@ func (r *Repository) ListPending(ctx context.Context, olderThan time.Time, limit
 	for rows.Next() {
 		n, err := scanNotification(rows)
 		if err != nil {
-			return nil, fmt.Errorf("scan pending notification: %w", err)
+			return nil, fmt.Errorf("scan reconcilable notification: %w", err)
 		}
 		items = append(items, *n)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate pending notifications: %w", err)
+		return nil, fmt.Errorf("iterate reconcilable notifications: %w", err)
 	}
 
 	return items, nil
@@ -565,7 +591,7 @@ func (r *Repository) Claim(ctx context.Context, id uuid.UUID, now time.Time, lea
 		   AND (
 		     status IN ('pending', 'queued')
 		     OR (status = 'scheduled' AND scheduled_at <= $2)
-		     OR (status = 'processing' AND updated_at < $3)
+		     OR (status = 'processing' AND updated_at < $3 AND attempt_count < max_attempts)
 		   )
 		 RETURNING `+notificationColumns,
 		[]any{id, now, staleBefore},
@@ -625,6 +651,32 @@ func (r *Repository) MarkDeadLetter(ctx context.Context, id uuid.UUID, message s
 		 WHERE id = $1 AND status = 'processing'
 		 RETURNING `+notificationColumns,
 		[]any{id, message, now.UTC()},
+		func(*Notification) map[string]any {
+			return map[string]any{"source": "worker", "action": "dead_letter", "error": message}
+		},
+	)
+}
+
+// MarkExhaustedLease moves a stale processing row to dead_letter when every
+// provider attempt has been used. It prevents a reclaimed lease from exceeding
+// the attempt_count <= max_attempts constraint.
+func (r *Repository) MarkExhaustedLease(
+	ctx context.Context,
+	id uuid.UUID,
+	now time.Time,
+	lease time.Duration,
+) (*Notification, error) {
+	now = now.UTC()
+	staleBefore := now.Add(-lease)
+	const message = "processing lease expired after final attempt"
+
+	return r.updateWithEvent(ctx, id,
+		`UPDATE notifications
+		 SET status = 'dead_letter', last_error = $2, updated_at = $3
+		 WHERE id = $1 AND status = 'processing'
+		   AND updated_at < $4 AND attempt_count >= max_attempts
+		 RETURNING `+notificationColumns,
+		[]any{id, message, now, staleBefore},
 		func(*Notification) map[string]any {
 			return map[string]any{"source": "worker", "action": "dead_letter", "error": message}
 		},
