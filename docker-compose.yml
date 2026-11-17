@@ -14,7 +14,7 @@ x-env: &env
   DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-notifications}?sslmode=disable
   REDIS_ADDR: redis:6379
   REDIS_PASSWORD: ${REDIS_PASSWORD:-}
-  PROVIDER_BASE_URL: ${PROVIDER_BASE_URL:-https://webhook.site/7ca283a1-c80c-42fe-b578-40775e908fea}
+  PROVIDER_BASE_URL: ${PROVIDER_BASE_URL:-https://webhook.site/replace-with-your-uuid}
   PROVIDER_TIMEOUT: ${PROVIDER_TIMEOUT:-10s}
   WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-50}
   RATE_LIMIT_PER_SECOND: ${RATE_LIMIT_PER_SECOND:-100}
