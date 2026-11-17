@@ -10,6 +10,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/onatozmenn/insider-one-notification-system/internal/notification"
 )
@@ -28,6 +32,7 @@ const (
 type TaskPayload struct {
 	NotificationID string `json:"notification_id"`
 	CorrelationID  string `json:"correlation_id"`
+	TraceParent    string `json:"traceparent,omitempty"`
 }
 
 // Queue submits delivery tasks to Redis.
@@ -109,9 +114,23 @@ func (q *Queue) enqueue(
 	scheduledAt *time.Time,
 	uniqueTTL time.Duration,
 ) error {
+	queueName := queueForPriority(priority)
+	ctx, span := otel.Tracer("queue").Start(ctx, "queue.enqueue",
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "asynq"),
+			attribute.String("queue.name", queueName),
+		),
+	)
+	defer span.End()
+
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+
 	payload, err := json.Marshal(TaskPayload{
 		NotificationID: id.String(),
 		CorrelationID:  correlationID,
+		TraceParent:    carrier.Get("traceparent"),
 	})
 	if err != nil {
 		return fmt.Errorf("marshal task payload: %w", err)

@@ -11,10 +11,16 @@ import (
 	"github.com/go-redis/redis_rate/v10"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/onatozmenn/insider-one-notification-system/internal/notification"
 	"github.com/onatozmenn/insider-one-notification-system/internal/platform/metrics"
 	"github.com/onatozmenn/insider-one-notification-system/internal/provider"
+	"github.com/onatozmenn/insider-one-notification-system/internal/realtime"
 )
 
 const defaultLease = 2 * time.Minute
@@ -46,6 +52,7 @@ type WorkerOptions struct {
 	Provider      WorkerProvider
 	Limiter       WorkerLimiter
 	Metrics       *metrics.Metrics
+	Publisher     func(ctx context.Context, event realtime.StatusEvent) error
 	Logger        *slog.Logger
 	Concurrency   int
 	RatePerSecond int
@@ -60,6 +67,7 @@ type Worker struct {
 	provider      WorkerProvider
 	limiter       WorkerLimiter
 	metrics       *metrics.Metrics
+	publisher     func(ctx context.Context, event realtime.StatusEvent) error
 	logger        *slog.Logger
 	concurrency   int
 	ratePerSecond int
@@ -91,6 +99,7 @@ func NewWorker(options WorkerOptions) *Worker {
 		provider:      options.Provider,
 		limiter:       options.Limiter,
 		metrics:       options.Metrics,
+		publisher:     options.Publisher,
 		logger:        options.Logger,
 		concurrency:   options.Concurrency,
 		ratePerSecond: options.RatePerSecond,
@@ -134,6 +143,21 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) error {
 	if err != nil {
 		return fmt.Errorf("parse notification id: %w", err)
 	}
+
+	if payload.TraceParent != "" {
+		ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier{
+			"traceparent": payload.TraceParent,
+		})
+	}
+
+	ctx, span := otel.Tracer("worker").Start(ctx, "notification.process",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "asynq"),
+			attribute.String("notification.id", id.String()),
+		),
+	)
+	defer span.End()
 
 	n, err := w.repository.Get(ctx, id)
 	if errors.Is(err, notification.ErrNotFound) {
@@ -180,9 +204,18 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) error {
 	w.metrics.ObserveQueueWait(string(claimed.Priority), string(claimed.Channel), time.Since(claimed.CreatedAt))
 	w.metrics.ObserveRateLimitWait(string(claimed.Channel), rateLimitWait)
 	w.metrics.IncStatus(string(claimed.Channel), string(notification.StatusProcessing))
+	w.publishStatus(ctx, claimed)
+
+	sendCtx, sendSpan := otel.Tracer("worker").Start(ctx, "provider.send",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("provider.channel", string(claimed.Channel)),
+			attribute.String("notification.id", claimed.ID.String()),
+		),
+	)
 
 	started := time.Now()
-	result, sendErr := w.provider.Send(ctx, provider.Message{
+	result, sendErr := w.provider.Send(sendCtx, provider.Message{
 		ID:            claimed.ID.String(),
 		To:            claimed.Recipient,
 		Channel:       string(claimed.Channel),
@@ -191,14 +224,24 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) error {
 	})
 	duration := time.Since(started)
 
+	if sendErr != nil {
+		sendSpan.RecordError(sendErr)
+		sendSpan.SetStatus(codes.Error, sendErr.Error())
+	} else {
+		sendSpan.SetStatus(codes.Ok, "")
+	}
+	sendSpan.End()
+
 	if sendErr == nil {
 		w.metrics.ObserveProvider(string(claimed.Channel), "success", duration)
 		w.metrics.IncStatus(string(claimed.Channel), string(notification.StatusAccepted))
 		w.metrics.ObserveProcessing(string(claimed.Channel), string(notification.StatusAccepted), time.Since(claimed.UpdatedAt))
 
-		if _, err := w.repository.MarkAccepted(ctx, claimed.ID, result.MessageID, time.Now().UTC()); err != nil {
+		accepted, err := w.repository.MarkAccepted(ctx, claimed.ID, result.MessageID, time.Now().UTC())
+		if err != nil {
 			return fmt.Errorf("mark accepted: %w", err)
 		}
+		w.publishStatus(ctx, accepted)
 		w.logger.Info("notification accepted",
 			"request_id", claimed.CorrelationID,
 			"notification_id", claimed.ID,
@@ -218,9 +261,11 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) error {
 		w.metrics.IncStatus(string(claimed.Channel), string(notification.StatusQueued))
 
 		nextAttempt := time.Now().UTC().Add(RetryDelay(retryCount(ctx), sendErr, task))
-		if _, err := w.repository.MarkQueuedForRetry(ctx, claimed.ID, sendErr.Error(), nextAttempt, time.Now().UTC()); err != nil {
+		retried, err := w.repository.MarkQueuedForRetry(ctx, claimed.ID, sendErr.Error(), nextAttempt, time.Now().UTC())
+		if err != nil {
 			return fmt.Errorf("mark retry: %w", err)
 		}
+		w.publishStatus(ctx, retried)
 		w.logger.Warn("notification retry scheduled",
 			"request_id", claimed.CorrelationID,
 			"notification_id", claimed.ID,
@@ -241,9 +286,11 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) error {
 		w.metrics.IncStatus(string(claimed.Channel), string(notification.StatusFailed))
 		w.metrics.ObserveProcessing(string(claimed.Channel), string(notification.StatusFailed), time.Since(claimed.UpdatedAt))
 
-		if _, err := w.repository.MarkFailed(ctx, claimed.ID, message, time.Now().UTC()); err != nil {
+		failed, err := w.repository.MarkFailed(ctx, claimed.ID, message, time.Now().UTC())
+		if err != nil {
 			return fmt.Errorf("mark failed: %w", err)
 		}
+		w.publishStatus(ctx, failed)
 		w.logger.Warn("notification failed permanently",
 			"request_id", claimed.CorrelationID,
 			"notification_id", claimed.ID,
@@ -260,9 +307,11 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) error {
 		w.metrics.IncStatus(string(claimed.Channel), string(notification.StatusDeadLetter))
 		w.metrics.ObserveProcessing(string(claimed.Channel), string(notification.StatusDeadLetter), time.Since(claimed.UpdatedAt))
 
-		if _, err := w.repository.MarkDeadLetter(ctx, claimed.ID, message, time.Now().UTC()); err != nil {
+		dead, err := w.repository.MarkDeadLetter(ctx, claimed.ID, message, time.Now().UTC())
+		if err != nil {
 			return fmt.Errorf("mark dead letter: %w", err)
 		}
+		w.publishStatus(ctx, dead)
 		w.logger.Warn("notification exhausted retries",
 			"request_id", claimed.CorrelationID,
 			"notification_id", claimed.ID,
@@ -276,9 +325,11 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) error {
 	w.metrics.IncStatus(string(claimed.Channel), string(notification.StatusQueued))
 
 	nextAttempt := time.Now().UTC().Add(RetryDelay(retryCount(ctx), sendErr, task))
-	if _, err := w.repository.MarkQueuedForRetry(ctx, claimed.ID, message, nextAttempt, time.Now().UTC()); err != nil {
+	retried, err := w.repository.MarkQueuedForRetry(ctx, claimed.ID, message, nextAttempt, time.Now().UTC())
+	if err != nil {
 		return fmt.Errorf("mark retry: %w", err)
 	}
+	w.publishStatus(ctx, retried)
 	w.logger.Warn("notification retry scheduled",
 		"request_id", claimed.CorrelationID,
 		"notification_id", claimed.ID,
@@ -287,6 +338,27 @@ func (w *Worker) handle(ctx context.Context, task *asynq.Task) error {
 		"error", message,
 	)
 	return sendErr
+}
+
+func (w *Worker) publishStatus(ctx context.Context, n *notification.Notification) {
+	if w.publisher == nil || n == nil {
+		return
+	}
+
+	event := realtime.StatusEvent{
+		NotificationID: n.ID.String(),
+		Channel:        string(n.Channel),
+		Status:         string(n.Status),
+		AttemptCount:   n.AttemptCount,
+		UpdatedAt:      n.UpdatedAt,
+	}
+	if err := w.publisher(ctx, event); err != nil {
+		w.logger.Warn("publish status event failed",
+			"notification_id", n.ID,
+			"status", n.Status,
+			"error", err,
+		)
+	}
 }
 
 func (w *Worker) waitForToken(ctx context.Context, channel notification.Channel) error {
