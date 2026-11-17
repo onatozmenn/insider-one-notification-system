@@ -12,6 +12,7 @@ This folder explains the design behind the notification system. Start with the p
 | [observability.md](observability.md) | Metrics, logs, health, tracing, WebSocket events. |
 | [testing.md](testing.md) | Test strategy and commands. |
 | [operations.md](operations.md) | Docker Compose, configuration, migrations, runbook. |
+| [demo.md](demo.md) | Step-by-step demo and expected results. |
 | [roadmap.md](roadmap.md) | Milestones, issues, commit plan. |
 | [decisions/](decisions/) | Architecture decision records. |
 

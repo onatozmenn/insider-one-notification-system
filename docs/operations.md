@@ -125,15 +125,14 @@ The `migrate` service runs automatically before the API and worker start. It use
 make up             # docker compose up --build
 make down           # docker compose down
 make logs           # follow logs
-make test           # unit + integration
-make test-unit      # unit only
-make test-integration
+make test           # current unit and contract suite
+make test-unit      # same suite, explicit target
 make lint           # golangci-lint
-make fmt            # gofmt + goimports
+make fmt            # gofmt
 make build          # local binaries
 make migrate-up
 make migrate-down
-make smoke          # end-to-end smoke test
+make migrate-version
 make openapi-lint
 ```
 

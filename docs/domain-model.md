@@ -75,7 +75,7 @@ erDiagram
 | Status | Meaning | Terminal |
 | --- | --- | --- |
 | `pending` | Created and committed, not yet enqueued. | No |
-| `scheduled` | Waiting for `scheduled_at`. Bonus. | No |
+| `scheduled` | Waiting for `scheduled_at`. | No |
 | `queued` | In Redis, waiting for a worker. | No |
 | `processing` | Claimed by a worker, provider call in progress. | No |
 | `accepted` | Provider returned 202. | Yes, unless delivery receipts are enabled. |

@@ -4,12 +4,14 @@
 
 The test suite has four layers. Each layer has a clear job; we do not duplicate the same assertion at every level.
 
-| Layer | What it proves | Speed |
-| --- | --- | --- |
-| Unit | Pure rules: validation, classification, backoff, rendering. | Milliseconds |
-| Integration | Repositories, handlers, worker pipeline, migrations with real PostgreSQL and Redis. | Seconds |
-| Contract | Provider adapter behaviour against a controlled HTTP server. | Milliseconds |
-| Smoke | The composed stack accepts a notification and reaches the provider. | Tens of seconds |
+| Layer | What it proves | Speed | Status |
+| --- | --- | --- | --- |
+| Unit | Pure rules: validation, state transitions, backoff, queue selection. | Milliseconds | Implemented |
+| Contract | Provider adapter behaviour against a controlled HTTP server. | Milliseconds | Implemented |
+| Integration | Repositories, worker pipeline, and migrations with real PostgreSQL and Redis. | Seconds | Next |
+| Smoke | The composed stack accepts a notification and reaches the provider. | Tens of seconds | Next |
+
+The current suite covers unit, provider contract, worker, service, and API handler tests. Repository integration tests and the Compose smoke target are the next milestone.
 
 ## 2. Unit tests
 
@@ -23,7 +25,7 @@ Packages and cases:
   - Priority defaults and invalid values.
   - Batch size 0, 1, 1000, 1001.
   - Scheduled time in the past and too far ahead.
-  - Template variables present, missing, and extra.
+  - Template fields rejected until the bonus feature lands.
   - Idempotency key replay, in-progress recovery, and conflict decisions.
 - `internal/delivery`:
   - Status code classification: 202, 400, 408, 425, 429, 500, 503.
@@ -33,20 +35,15 @@ Packages and cases:
   - Max attempts.
   - Queue selection by priority.
   - Rate limiter wait and cancellation decisions with a fake limiter.
-- `internal/template`:
-  - Simple substitution.
-  - Missing variable.
-  - Escaping and repeated placeholders.
 - `internal/platform`:
   - Config validation and defaults.
   - Correlation ID generation and propagation.
-  - Recipient masking.
 
 Use table-driven tests. Use `t.Parallel()` where the code has no shared state.
 
-## 3. Integration tests
+## 3. Integration tests (next)
 
-Integration tests use real PostgreSQL and Redis. They do not mock the database.
+The target integration coverage uses real PostgreSQL and Redis. It does not mock the database. This layer is not implemented yet.
 
 - `internal/notification/repository_test.go`:
   - Insert and read a notification.
@@ -99,9 +96,9 @@ The provider adapter is tested with `httptest.Server`:
 
 The real webhook.site endpoint is never used in tests. It is a demo dependency, not a test dependency.
 
-## 5. Smoke test
+## 5. Smoke test (next)
 
-`make smoke` runs against the composed stack. The smoke profile overrides `PROVIDER_BASE_URL` with a local `provider-mock` service, so the test never depends on the expiring webhook.site URL.
+The planned smoke target runs against the composed stack and overrides `PROVIDER_BASE_URL` with a local mock provider, so it never depends on the expiring webhook.site URL. Until it lands, use [demo.md](demo.md) for the manual walkthrough.
 
 1. Wait for `/readyz`.
 2. Create one SMS notification.
@@ -117,14 +114,11 @@ The script fails with a non-zero exit code and prints the last status and logs o
 The unit targets are available now. Integration and smoke targets are still in progress.
 
 ```bash
-# Everything
+# Everything currently implemented
 make test
 
 # Unit only
 make test-unit
-
-# Integration only
-make test-integration
 
 # Race detector
 go test -race ./...
@@ -132,8 +126,8 @@ go test -race ./...
 # One package
 go test ./internal/notification/...
 
-# Smoke test against the running stack
-make smoke
+# OpenAPI lint
+make openapi-lint
 ```
 
 Without Make:
@@ -141,22 +135,20 @@ Without Make:
 ```bash
 go test ./...
 go test -race ./...
-docker compose --profile test run --rm test
+npx --yes @redocly/cli@latest lint api/openapi.yaml
 ```
 
 ## 7. CI
 
 `.github/workflows/ci.yml` runs on every push and pull request:
 
-1. `gofmt` and `goimports` check.
-2. `golangci-lint`.
-3. `go vet`.
-4. Unit tests.
-5. Integration tests with PostgreSQL and Redis services.
-6. `go test -race ./...`.
-7. OpenAPI lint.
-8. Docker build for the API/worker image.
-9. `govulncheck`.
+1. `gofmt` check.
+2. `go vet`.
+3. `go test -race ./...`.
+4. `go build ./...`.
+5. `golangci-lint`.
+6. OpenAPI lint.
+7. Docker build for the API/worker image.
 
 Cache Go modules and build cache. Fail fast on formatting and lint.
 
@@ -164,7 +156,7 @@ Cache Go modules and build cache. Fail fast on formatting and lint.
 
 - Target: 70% or more on `internal/notification` and `internal/delivery`.
 - Do not chase 100%. Generated code and `main` packages are excluded.
-- Coverage is reported in CI, not enforced as a hard gate. A missing test for a core rule is a review blocker.
+- Coverage is reported locally, not enforced as a hard gate. A missing test for a core rule is a review blocker.
 
 ## 9. Test data
 
