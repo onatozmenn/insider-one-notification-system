@@ -36,6 +36,7 @@ Packages and cases:
   - `Retry-After` parsing.
   - Max attempts.
   - Queue selection by priority.
+  - Per-channel rate limit key, 100/second, burst 1.
   - Rate limiter wait and cancellation decisions with a fake limiter.
 - `internal/platform`:
   - Config validation and defaults.
@@ -60,16 +61,18 @@ Integration tests use real PostgreSQL and Redis. They are behind the `integratio
   - Guarded transitions affect exactly one row and reject stale writes.
   - List filters, ordering, pagination, and total count.
   - Batch insert and rollback when one item fails.
+  - A 1000-item batch insert and summary.
   - Idempotency key conflict behaviour.
   - Templates, duplicate names, and the email-subject database constraint.
   - Retry and cancellation guards.
-  - Reconcilable pending, due scheduled, and stale queued rows.
+  - Reconcilable pending, due scheduled, stale queued, and expired processing rows.
   - Stale processing at `max_attempts` moves to `dead_letter`.
   - Expired idempotency keys are deleted and can be reused.
 - `internal/delivery/delivery_integration_test.go`:
   - Manual retries are not collapsed by the asynq uniqueness lock.
-  - The reconciler enqueues old pending, due scheduled, and stale queued rows.
+  - The reconciler enqueues old pending, due scheduled, stale queued, and lost processing rows.
   - An archived task with the same ID is removed and re-enqueued.
+  - Two limiter clients share the Redis rate-limit state.
   - Queue depth polling.
   - Worker start and shutdown against Redis.
 - `internal/realtime/hub_integration_test.go`:
@@ -179,7 +182,7 @@ The other jobs run `golangci-lint`, OpenAPI lint, Compose validation, and the Do
 ## 8. Coverage
 
 - Target: 70% or more on `internal/notification` and `internal/delivery`.
-- Current local result with the integration tag: `internal/notification` 76.1%, `internal/delivery` 73.5%, combined 75.3%.
+- Current local result with the integration tag: `internal/notification` 76.1%, `internal/delivery` 73.6%, combined 75.4%.
 - `make coverage` prints the per-function report and writes `coverage.out`.
 - Do not chase 100%. Generated code and `main` packages are excluded.
 - Coverage is reported, not enforced as a hard gate. A missing test for a core rule is a review blocker.

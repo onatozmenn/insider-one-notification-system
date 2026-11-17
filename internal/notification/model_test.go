@@ -21,7 +21,7 @@ func TestStatusTerminal(t *testing.T) {
 func TestStatusCancellable(t *testing.T) {
 	assert.True(t, StatusPending.Cancellable())
 	assert.True(t, StatusScheduled.Cancellable())
-	assert.False(t, StatusQueued.Cancellable())
+	assert.True(t, StatusQueued.Cancellable())
 	assert.False(t, StatusProcessing.Cancellable())
 	assert.False(t, StatusAccepted.Cancellable())
 }

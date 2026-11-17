@@ -11,7 +11,7 @@ Built for the **Insider One Software Engineer Assessment 2026** with **Go 1.26**
 - Create one notification or a batch of up to 1000.
 - Render reusable templates with `{{variable}}` substitution, or send inline content.
 - Query by notification ID or batch ID. List with status, channel, batch, and date filters plus pagination.
-- Cancel pending or scheduled notifications. Retry failed or dead-letter notifications.
+- Cancel pending, scheduled, or queued notifications. Retry failed or dead-letter notifications.
 - Process asynchronously with weighted priority queues, a shared 100 messages/second limit per channel, retries, and dead-letter handling.
 - Reduce duplicate sends with API idempotency keys, unique task IDs, and guarded state transitions. The delivery contract remains at-least-once.
 - Deliver through webhook.site, with `202 accepted` treated as provider acceptance.
@@ -38,7 +38,7 @@ flowchart LR
 
 The API and worker are two processes from the same codebase. PostgreSQL is the source of truth; Redis holds the queue, rate limiter, and pub/sub state. This is a modular monolith, not a microservice fleet.
 
-The worker waits for a channel token before claiming a row, so the processing lease only covers the provider call. A guarded claim accepts `pending`, `queued`, a due `scheduled`, or a stale `processing` row. A reconciler re-enqueues pending rows, due scheduled rows, and queued rows that have not advanced for 15 minutes.
+The worker waits for a channel token before claiming a row, so the processing lease only covers the provider call. A guarded claim accepts `pending`, `queued`, a due `scheduled`, or a stale `processing` row. A reconciler re-enqueues pending rows, due scheduled rows, queued rows that have not advanced for 15 minutes, and processing rows past the lease.
 
 See [docs/architecture.md](docs/architecture.md) for the full design and [docs/decisions/](docs/decisions/) for the trade-offs.
 
@@ -51,7 +51,7 @@ See [docs/architecture.md](docs/architecture.md) for the full design and [docs/d
 | Rate limiting | `redis_rate` GCRA, 100 requests/second per channel, burst 1, shared across replicas. |
 | Delivery | At-least-once with exponential backoff, jitter, `Retry-After`, and a dead-letter state. |
 | Idempotency | API `Idempotency-Key` plus worker task IDs and guarded transitions. |
-| Recovery | A reconciler sweeps pending, due scheduled, and stale queued rows after a crash or a Redis outage. |
+| Recovery | A reconciler sweeps pending, due scheduled, stale queued, and expired processing rows after a crash or a Redis outage. |
 | Scheduling | `scheduled_at` uses asynq `ProcessAt`; cancellation is checked when the task fires. |
 | Templates | `templates` table, `{{variable}}` rendering, missing variables rejected before enqueue. |
 | Realtime | Redis pub/sub to a WebSocket hub; clients get a snapshot, then live status frames. |
@@ -151,7 +151,7 @@ curl -s "http://localhost:8080/api/v1/batches/${BATCH_ID}"
 curl -s 'http://localhost:8080/api/v1/notifications?status=accepted&channel=sms&page=1&page_size=20'
 ```
 
-Cancel a pending or scheduled notification:
+Cancel a pending, scheduled, or queued notification:
 
 ```bash
 curl -s -X POST "http://localhost:8080/api/v1/notifications/${NOTIFICATION_ID}/cancel"
@@ -199,14 +199,17 @@ websocat "ws://localhost:8080/api/v1/ws?notification_id=${NOTIFICATION_ID}"
 Schedule a notification:
 
 ```bash
+SCHEDULED_AT=$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%SZ)  # GNU date
+# macOS: SCHEDULED_AT=$(date -u -v+5M +%Y-%m-%dT%H:%M:%SZ)
+
 curl -s -X POST http://localhost:8080/api/v1/notifications \
   -H 'Content-Type: application/json' \
-  -d '{
-    "recipient": "+15555550100",
-    "channel": "sms",
-    "content": "This is scheduled.",
-    "scheduled_at": "2026-11-18T10:00:00Z"
-  }'
+  -d "{
+    \"recipient\": \"+15555550100\",
+    \"channel\": \"sms\",
+    \"content\": \"This is scheduled.\",
+    \"scheduled_at\": \"$SCHEDULED_AT\"
+  }"
 ```
 
 Inspect stats:
@@ -231,12 +234,13 @@ curl -s http://localhost:8080/api/v1/stats
 - **Rate limit:** 100 provider calls per second per channel, shared through Redis. The token wait happens before the claim.
 - **Retries:** up to 5 provider attempts by default. Exponential backoff with full jitter, capped at 30 seconds. `Retry-After` is honoured.
 - **Infrastructure retries:** Redis/database failures use a separate asynq transport retry budget (100) and do not consume provider attempts.
+- **Provider acceptance:** a `202` is accepted even when the response body is truncated or malformed; only `messageId` is best-effort.
 - **Error classes:** `408`, `425`, `429`, `5xx`, timeouts, and network errors are transient. Other `4xx` are permanent.
 - **Dead letter:** exhausted transient retries move to `dead_letter` with the last error and attempt count. `POST /notifications/{id}/retry` resets the row, uses a fresh task ID, and re-enqueues it.
 - **Templates:** the API renders the template before validation. A missing variable rejects the request with `variables.<name>` details. The stored notification keeps the rendered content.
-- **Idempotency:** the API stores a key and request hash and replays the original resource. Keys expire after 24 hours; expired rows are deleted on read and by an hourly cleanup, so the key can be reused. The worker uses the notification ID as the task ID and guards every transition.
-- **Cancellation:** only `pending` and `scheduled`; the worker re-checks before the provider call.
-- **Recovery:** a reconciler every 30 seconds re-enqueues pending rows, due scheduled rows, and queued rows that have not advanced for 15 minutes. Archived tasks that still own the ID are removed and re-enqueued. A stale `processing` row can be reclaimed after the lease; if it already used every attempt, it moves to `dead_letter`.
+- **Idempotency:** the API stores a key and request hash and replays the original resource. Keys expire after 24 hours; expired rows are deleted on read and by an hourly cleanup, so the key can be reused. A scheduled request can replay after its scheduled time. The worker uses the notification ID as the task ID and guards every transition.
+- **Cancellation:** `pending`, `scheduled`, and `queued`; `processing` is too late. The worker re-checks before the provider call.
+- **Recovery:** a reconciler every 30 seconds re-enqueues pending rows, due scheduled rows, queued rows that have not advanced for 15 minutes, and processing rows past the lease. Archived tasks that still own the ID are removed and re-enqueued. A stale `processing` row at the attempt limit moves to `dead_letter`.
 
 ## Testing
 
@@ -252,7 +256,7 @@ make load-test      # k6 create throughput, requires k6 and a running stack
 
 The suite covers validation, idempotency and service rules, templates and rendering, API handlers, WebSocket frames, provider responses (202, 400, 429, 500, timeout), worker transitions, retry backoff, priority mapping, tracing endpoint handling, repository transitions, job queueing, the reconciler, and Redis pub/sub. Provider tests use `httptest` and do not depend on webhook.site.
 
-Integration tests use testcontainers locally and GitHub Actions service containers in CI. Current coverage is 76.1% for `internal/notification` and 73.5% for `internal/delivery`. The manual end-to-end checks below were run against the Compose stack and the bonus features were exercised the same way.
+Integration tests use testcontainers locally and GitHub Actions service containers in CI. Current coverage is 76.1% for `internal/notification` and 73.6% for `internal/delivery`. The manual end-to-end checks below were run against the Compose stack and the bonus features were exercised the same way.
 
 ## Verified end-to-end
 
@@ -275,7 +279,9 @@ On 2026-11-18, against the local Compose stack and webhook.site:
 - Under that burst, Prometheus showed 15.5 SMS provider calls/s with a 4468-deep queue: below the 100/s per-channel cap, with provider latency as the bottleneck.
 - Prometheus targets for API and worker were `up`; Grafana loaded the provisioned dashboard and datasource.
 - `make smoke`: one notification and a batch of three reached `accepted`; `/stats` returned counts.
-- Recovery regression tests: due scheduled and stale queued rows were re-enqueued; an archived task was removed and re-enqueued; a stale processing row at `max_attempts` moved to `dead_letter`; an expired idempotency key was deleted and reused.
+- Recovery regression tests: due scheduled, stale queued, and lost processing rows were re-enqueued; an archived task was removed and re-enqueued; a stale processing row at `max_attempts` moved to `dead_letter`; an expired idempotency key was deleted and reused.
+- Batch of 1000: repository insert and batch summary verified in integration tests; batch validation accepts exactly 1000.
+- Rate limit: unit test asserts the per-channel key, 100 requests/second, and burst 1; an integration test proves two worker clients share Redis limiter state. Actual measured throughput remains provider-bound.
 - CI: unit, integration, coverage, lint, Docker build, and OpenAPI lint passed.
 
 ## Documentation
@@ -298,6 +304,6 @@ On 2026-11-18, against the local Compose stack and webhook.site:
 - At-least-once delivery, not exactly-once.
 - No authentication or multi-tenancy; the API is intended for a local demo.
 - webhook.site is a simulation. `accepted` means the provider accepted the message, not that a user received it.
-- A Redis flush loses queued tasks; the reconciler recovers pending, due scheduled, and stale queued rows after 15 minutes. In-flight provider calls can still be duplicated.
+- A Redis flush loses queued tasks; the reconciler recovers pending, due scheduled, stale queued, and expired processing rows. In-flight provider calls can still be duplicated.
 - Offset pagination can shift when new rows arrive during a scan.
 - WebSocket updates are best-effort. A client that misses a frame can re-read the notification; there is no replay buffer.

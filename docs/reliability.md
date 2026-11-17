@@ -4,7 +4,7 @@
 
 The system is **at-least-once after PostgreSQL accepts the work**. Redis is the queue; if a task is lost, the reconciler re-enqueues the row after a threshold. A notification may be sent more than once if a worker crashes after the provider accepted it and before the database update commits. We reduce duplicate sends with two layers of idempotency, but we do not claim exactly-once delivery.
 
-A Redis flush or data-loss event can drop `queued` tasks. The reconciler re-enqueues `pending` rows, due `scheduled` rows, and `queued` rows that have not advanced for 15 minutes. It can still duplicate an in-flight provider call; production would use a transactional outbox or a durable queue with stronger guarantees. This limitation is deliberate for the assessment.
+A Redis flush or data-loss event can drop `queued` tasks. The reconciler re-enqueues `pending` rows, due `scheduled` rows, `queued` rows that have not advanced for 15 minutes, and `processing` rows whose lease expired. It can still duplicate an in-flight provider call; production would use a transactional outbox or a durable queue with stronger guarantees. This limitation is deliberate for the assessment.
 
 Ordering is not guaranteed. A batch may finish out of order.
 
@@ -103,7 +103,7 @@ Example delays for attempts 0 to 3: 0 to 1s, 0 to 2s, 0 to 4s, 0 to 8s.
 | Invalid URL or unsupported channel | Permanent | Mark `failed`. |
 | Context cancelled by shutdown | Transient | Return the task to the queue. |
 
-The provider adapter returns a typed error with `Transient bool`, `RetryAfter time.Duration`, and `Message string`. The worker uses that type; it does not inspect raw strings.
+The provider adapter returns a typed error with `Transient bool`, `RetryAfter time.Duration`, and `Message string`. The worker uses that type; it does not inspect raw strings. For `202`, the adapter checks the status before reading the body; a truncated or malformed success body does not turn acceptance into a retry.
 
 ## 7. Dead letter
 
@@ -138,6 +138,7 @@ Two layers:
 - Completed requests replay the original resource with `Idempotent-Replayed: true`.
 - Different body with the same key returns `422`.
 - Keys expire after 24 hours. An expired key is deleted when it is read, and the API deletes expired rows hourly, so the key can be reused.
+- A replay is checked before the scheduled-time window, so a scheduled request can still replay after its scheduled time has passed.
 
 ### Worker layer
 
@@ -149,10 +150,10 @@ Two layers:
 
 ## 9. Cancellation
 
-- Only `pending` and `scheduled` can be cancelled.
-- Cancellation is a guarded update: `UPDATE ... WHERE status IN ('pending', 'scheduled')`.
+- `pending`, `scheduled`, and `queued` can be cancelled. The guarded update and the worker claim race on the row.
+- Cancellation is a guarded update: `UPDATE ... WHERE status IN ('pending', 'scheduled', 'queued')`.
 - A scheduled asynq task is not deleted. When it fires, the worker sees `cancelled` and stops. This avoids a race between deleting the task and the worker claiming it.
-- `queued` and `processing` return `409`. A message in Redis may already be on its way to the provider.
+- `processing` returns `409`. A message in Redis may already be on its way to the provider.
 
 ## 10. Reconciler
 
@@ -165,11 +166,12 @@ SELECT id FROM notifications
 WHERE (status = 'pending' AND created_at < now() - interval '1 minute')
    OR (status = 'scheduled' AND scheduled_at <= now())
    OR (status = 'queued' AND updated_at < now() - interval '15 minutes')
+   OR (status = 'processing' AND updated_at < now() - interval '3 minutes')
 ORDER BY created_at
 LIMIT 100;
 ```
 
-It enqueues each row with the notification ID as the asynq task ID. If an archived task still owns that ID, the reconciler deletes the archive entry first; if the unique lock survives, it creates a fresh recovery task ID. Pending rows move to `queued`; due scheduled rows keep `scheduled`; stale queued rows keep `queued`. The same loop recovers from a short Redis outage, a lost `queued` task, an archived task, and a scheduled notification whose first enqueue failed. It cannot reconstruct a task that is still in flight and may duplicate a provider call; the delivery contract remains at-least-once.
+It enqueues each row with the notification ID as the asynq task ID. If an archived task still owns that ID, the reconciler deletes the archive entry first; if the unique lock survives, it creates a fresh recovery task ID. Pending rows move to `queued`; due scheduled, stale queued, and expired processing rows keep their status. A re-enqueued processing row is claimed after its lease, or moved to `dead_letter` if it has used every attempt. The same loop recovers from a short Redis outage, a lost task, an archived task, a lost processing task, and a scheduled notification whose first enqueue failed. It cannot reconstruct a task that is still in flight and may duplicate a provider call; the delivery contract remains at-least-once.
 
 This is not a full transactional outbox. It covers the failure window with much less code, and the trade-off is documented in [decisions/0002](decisions/0002-postgres-redis-asynq.md) and [decisions/0006](decisions/0006-recovery-and-retry-budget.md).
 
@@ -189,17 +191,18 @@ This is not a full transactional outbox. It covers the failure window with much 
 | API dies after commit, before enqueue | Row stays `pending` | Reconciler enqueues it within 30 seconds |
 | Scheduled initial enqueue fails | Row stays `scheduled` | Reconciler enqueues it when `scheduled_at` is due |
 | Queued task is lost or asynq exhausts transport retries | Row stays `queued` | Reconciler re-enqueues it after 15 minutes |
+| Processing task is lost from Redis | Row stays `processing` | Reconciler re-enqueues it after the 3-minute lease |
 | Worker dies during the final provider attempt | Row stays `processing` at `max_attempts` | Reconciler/worker moves it to `dead_letter` after the lease |
 | Worker dies before provider call | Task retries | Attempt count increases |
 | Worker dies after provider 202, before DB update | Task retries; provider may receive a duplicate | Provider idempotency header; DB guard on the next attempt |
 | Provider returns 500 | Retry with backoff | `queued` then `processing` again |
 | Provider returns 400 | `failed` | No retry |
 | Provider is slow | 10-second timeout, then retry | `last_error` records the timeout |
-| Redis is down | API persists creates as `pending` and returns 202; readiness fails; worker cannot consume | `pending` rows; reconciler enqueues pending, due scheduled, and stale queued rows after Redis returns |
+| Redis is down | API persists creates as `pending` and returns 202; readiness fails; worker cannot consume | `pending` rows; reconciler enqueues pending, due scheduled, stale queued, and expired processing rows after Redis returns |
 | PostgreSQL is down | API returns 503; worker retries | `/readyz` reports the failure |
 | Queue is flooded | Rate limiter throttles; queue depth grows | `/stats` and `/metrics` show depth and wait time |
 | Duplicate API request | Idempotency key replays the response | `Idempotent-Replayed: true` |
-| Cancel a queued notification | `409` | Documented behaviour |
+| Cancel a queued notification | `200` if no worker claimed it; `409` once it is `processing` | Guarded update wins the race |
 
 ## 13. What we do not guarantee
 

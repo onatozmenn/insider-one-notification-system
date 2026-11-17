@@ -205,6 +205,17 @@ func TestValidateBatch(t *testing.T) {
 	assert.Len(t, got, 2)
 }
 
+func TestValidateBatchAcceptsMaximum(t *testing.T) {
+	items := make([]CreateInput, MaxBatchSize)
+	for i := range items {
+		items[i] = validSMS()
+	}
+
+	validated, err := ValidateBatch(BatchInput{Notifications: items}, testNow)
+	require.NoError(t, err)
+	assert.Len(t, validated, MaxBatchSize)
+}
+
 func TestValidateBatchRejectsEmpty(t *testing.T) {
 	_, err := ValidateBatch(BatchInput{}, testNow)
 	require.Error(t, err)

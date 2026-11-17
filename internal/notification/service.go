@@ -129,13 +129,13 @@ func (s *Service) Create(
 		return nil, false, err
 	}
 
-	validated, err := ValidateCreate(input, now)
+	canonical, err := ValidateCreateForReplay(input)
 	if err != nil {
 		return nil, false, err
 	}
 
 	key := strings.TrimSpace(idempotencyKey)
-	hash := hashValue(validated)
+	hash := hashValue(canonical)
 
 	if key != "" {
 		record, err := s.store.GetIdempotency(ctx, ScopeSingle, key)
@@ -145,6 +145,11 @@ func (s *Service) Create(
 		if !errors.Is(err, ErrNotFound) {
 			return nil, false, err
 		}
+	}
+
+	validated, err := ValidateCreate(input, now)
+	if err != nil {
+		return nil, false, err
 	}
 
 	id, err := uuid.NewV7()
@@ -246,13 +251,13 @@ func (s *Service) CreateBatch(
 		return nil, false, &ValidationError{Details: errs}
 	}
 
-	validated, err := ValidateBatch(BatchInput{Notifications: resolved}, now)
+	canonical, err := ValidateBatchForReplay(BatchInput{Notifications: resolved})
 	if err != nil {
 		return nil, false, err
 	}
 
 	key := strings.TrimSpace(idempotencyKey)
-	hash := hashValue(validated)
+	hash := hashValue(canonical)
 
 	if key != "" {
 		record, err := s.store.GetIdempotency(ctx, ScopeBatch, key)
@@ -262,6 +267,11 @@ func (s *Service) CreateBatch(
 		if !errors.Is(err, ErrNotFound) {
 			return nil, false, err
 		}
+	}
+
+	validated, err := ValidateBatch(BatchInput{Notifications: resolved}, now)
+	if err != nil {
+		return nil, false, err
 	}
 
 	batchID, err := uuid.NewV7()

@@ -43,7 +43,7 @@ curl -s -X POST "$BASE_URL/api/v1/notifications" \
 Expected: `202` with `"status":"queued"`. Save the `id` and poll:
 
 ```bash
-export NOTIFICATION_ID=<id>
+export NOTIFICATION_ID="<id>"
 curl -s "$BASE_URL/api/v1/notifications/$NOTIFICATION_ID"
 ```
 
@@ -77,7 +77,7 @@ curl -s -X POST "$BASE_URL/api/v1/notifications/batch" \
 Expected: `202` with a `batch_id`, `total: 3`, and a `status_url`. Poll the batch:
 
 ```bash
-export BATCH_ID=<batch_id>
+export BATCH_ID="<batch_id>"
 curl -s "$BASE_URL/api/v1/batches/$BATCH_ID"
 ```
 
@@ -165,7 +165,7 @@ Expected: `202` and `"content":"Hello Onat, your code is ABC"`. Remove `code` fr
 After the failure demo, keep the dead-letter notification ID and call:
 
 ```bash
-export DEAD_LETTER_ID=<id-from-section-5>
+export DEAD_LETTER_ID="<id-from-section-5>"
 curl -s -X POST "$BASE_URL/api/v1/notifications/$DEAD_LETTER_ID/retry"
 ```
 
@@ -183,7 +183,7 @@ curl -s -X POST "$BASE_URL/api/v1/notifications" \
   -d "{\"recipient\":\"+15555550100\",\"channel\":\"sms\",\"content\":\"WebSocket demo\",\"scheduled_at\":\"$SCHEDULED_AT\"}"
 
 # Copy the id from the response, then:
-export NOTIFICATION_ID=<id>
+export NOTIFICATION_ID="<id>"
 websocat "ws://localhost:8080/api/v1/ws?notification_id=$NOTIFICATION_ID"
 ```
 

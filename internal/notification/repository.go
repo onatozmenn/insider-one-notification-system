@@ -234,7 +234,7 @@ func (r *Repository) Cancel(ctx context.Context, id uuid.UUID) (*Notification, e
 	row := tx.QueryRow(ctx,
 		`UPDATE notifications
 		 SET status = 'cancelled', cancelled_at = $2, updated_at = $2
-		 WHERE id = $1 AND status IN ('pending', 'scheduled')
+		 WHERE id = $1 AND status IN ('pending', 'scheduled', 'queued')
 		 RETURNING `+notificationColumns,
 		id, now,
 	)
@@ -543,6 +543,7 @@ func (r *Repository) ListReconcilable(
 	pendingBefore time.Time,
 	scheduledBefore time.Time,
 	queuedBefore time.Time,
+	processingBefore time.Time,
 	limit int,
 ) ([]Notification, error) {
 	if limit <= 0 {
@@ -555,9 +556,10 @@ func (r *Repository) ListReconcilable(
 		 WHERE (status = 'pending' AND created_at < $1)
 		    OR (status = 'scheduled' AND scheduled_at <= $2)
 		    OR (status = 'queued' AND updated_at < $3)
+		    OR (status = 'processing' AND updated_at < $4)
 		 ORDER BY created_at
-		 LIMIT $4`,
-		pendingBefore, scheduledBefore, queuedBefore, limit,
+		 LIMIT $5`,
+		pendingBefore, scheduledBefore, queuedBefore, processingBefore, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list reconcilable notifications: %w", err)

@@ -90,7 +90,7 @@ func (s Status) Terminal() bool {
 
 // Cancellable reports whether the notification can still be cancelled.
 func (s Status) Cancellable() bool {
-	return s == StatusPending || s == StatusScheduled
+	return s == StatusPending || s == StatusScheduled || s == StatusQueued
 }
 
 // DeriveBatchStatus applies the batch precedence rules.

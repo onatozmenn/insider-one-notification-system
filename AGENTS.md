@@ -18,7 +18,7 @@ A reviewer can:
 2. Create a single notification and a batch of up to 1000.
 3. Query by notification ID or batch ID.
 4. List notifications with status, channel, and date filters plus pagination.
-5. Cancel a pending notification.
+5. Cancel a pending, scheduled, or queued notification.
 6. Watch priority, rate limiting, retries, and idempotency in action.
 7. Read `/metrics`, structured logs, `/healthz`, `/readyz`, and the OpenAPI docs.
 8. Run the test suite with one command.
@@ -35,7 +35,7 @@ From the brief:
 - Versioned database migrations.
 - Test suite runnable with one command.
 - Provider simulation: `POST https://webhook.site/{uuid}` with `{ "to", "channel", "content" }`; expects `202` and `{ "messageId", "status", "timestamp" }`.
-- Notification API: create, batch up to 1000, status by ID or batch ID, cancel pending, list with filters and pagination.
+- Notification API: create, batch up to 1000, status by ID or batch ID, cancel pending/scheduled/queued, list with filters and pagination.
 - Processing: async queue workers, 100 messages/second per channel, priority queues (high/normal/low), content validation, idempotency.
 - Observability: metrics endpoint, structured logs with correlation IDs, health check.
 - Delivery and retry design is ours.
@@ -170,7 +170,7 @@ Every choice is mature and boring. The assessment is about design and reliabilit
 
 - `pending` to `queued` on enqueue.
 - `pending` to `processing` when a worker claims before the API writes `queued`.
-- `pending` or `scheduled` to `cancelled` on cancel.
+- `pending`, `scheduled`, or `queued` to `cancelled` on cancel.
 - `scheduled` to `processing` when the scheduled task fires and a worker claims it.
 - `queued` to `processing` when a worker claims the row.
 - `processing` to `processing` when the lease expires and a retry claims the row.
@@ -222,11 +222,11 @@ Two layers:
 
 ### Cancellation
 
-Only `pending` and `scheduled` notifications can be cancelled. Anything else returns `409 Conflict`. Workers re-check the status before calling the provider to close the race.
+`pending`, `scheduled`, and `queued` notifications can be cancelled. `processing` and terminal states return `409 Conflict`. The guarded update and the worker claim race on the row; whichever wins decides delivery. Workers re-check the status before calling the provider to close the race.
 
 ### Delivery contract
 
-At-least-once after PostgreSQL accepts the work. A notification may be sent more than once if a worker crashes after the provider accepted it and before the database update commits. We reduce duplicate sends with idempotency keys and state guards, but we do not promise exactly-once. A Redis flush can drop queued tasks; the reconciler re-enqueues pending rows, due scheduled rows, and queued rows idle for 15 minutes. Production would use a durable outbox or queue.
+At-least-once after PostgreSQL accepts the work. A notification may be sent more than once if a worker crashes after the provider accepted it and before the database update commits. We reduce duplicate sends with idempotency keys and state guards, but we do not promise exactly-once. A Redis flush can drop queued tasks; the reconciler re-enqueues pending rows, due scheduled rows, queued rows idle for 15 minutes, and processing rows past the lease. Production would use a durable outbox or queue.
 
 ## 8. API rules
 

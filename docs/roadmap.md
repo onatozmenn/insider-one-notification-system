@@ -37,7 +37,7 @@
 | M1-2 | Domain model and validation | Channel rules, batch limits, typed errors. |
 | M1-3 | Create and persist a single notification | 202, transaction, event row, API idempotency. Enqueue arrives in M2-1. |
 | M1-4 | Get and list notifications | Filters, pagination, stable order. |
-| M1-5 | Cancel notification | 200 for pending/scheduled, 409 otherwise. |
+| M1-5 | Cancel notification | 200 for pending/scheduled/queued, 409 otherwise. |
 | M1-6 | Batch create and summary | Up to 1000, atomic validation, derived status. |
 | M1-7 | OpenAPI and Swagger UI | Spec matches handlers, docs served. |
 

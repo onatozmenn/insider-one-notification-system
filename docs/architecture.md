@@ -98,7 +98,7 @@ sequenceDiagram
 3. After commit, enqueue each notification.
 4. Return `202 Accepted` with the batch ID and a status URL.
 
-If the process dies after commit and before all tasks are enqueued, the reconciler finds `pending` rows older than one minute and enqueues them. It also enqueues due `scheduled` rows and `queued` rows that have not advanced for 15 minutes. This is the same recovery path used for a Redis outage or a lost task.
+If the process dies after commit and before all tasks are enqueued, the reconciler finds `pending` rows older than one minute and enqueues them. It also enqueues due `scheduled` rows, `queued` rows that have not advanced for 15 minutes, and `processing` rows whose lease expired. This is the same recovery path used for a Redis outage or a lost task.
 
 The enqueue and the `pending` to `queued` update are not atomic. A worker can dequeue the task before the API writes `queued`, so the worker claim accepts both `pending` and `queued`. This closes the race without a transactional outbox.
 
@@ -106,7 +106,7 @@ The protocol is:
 
 - API commits `pending`, enqueues, then updates to `queued`.
 - Worker claim accepts `pending` or `queued`. A task that arrives before the `queued` update is claimed from `pending`.
-- Reconciler sweeps `pending` older than one minute, due `scheduled` rows, and `queued` rows idle for 15 minutes.
+- Reconciler sweeps `pending` older than one minute, due `scheduled` rows, `queued` rows idle for 15 minutes, and `processing` rows past the three-minute lease.
 - Claim also accepts a due `scheduled` row and a stale `processing` row, but never reclaims a stale row that has used every attempt.
 
 A `processing` row is owned by the worker until it writes a retry or terminal state. The claim increments `attempt_count` and refreshes `updated_at`. If the worker dies, `updated_at` stops advancing; after a 2-minute lease a retried task can reclaim the row. If the row has already used every attempt, the worker moves it to `dead_letter` instead of reclaiming it. The lease is longer than the provider timeout.
@@ -143,7 +143,7 @@ Rules:
 - Rate limiter state.
 - Pub/sub channels for WebSocket updates.
 
-Redis is treated as disposable. If it is flushed, the reconciler re-enqueues `pending` work, due scheduled work, and queued rows idle for 15 minutes, but a provider call that was already in flight can be duplicated. This is an accepted trade-off for the assessment; a production system would use a durable outbox or a queue with stronger persistence guarantees.
+Redis is treated as disposable. If it is flushed, the reconciler re-enqueues `pending` work, due scheduled work, queued rows idle for 15 minutes, and expired processing rows, but a provider call that was already in flight can be duplicated. This is an accepted trade-off for the assessment; a production system would use a durable outbox or a queue with stronger persistence guarantees.
 
 ## 8. Scaling model
 
@@ -160,7 +160,7 @@ Redis is treated as disposable. If it is flushed, the reconciler re-enqueues `pe
 | Provider is down or slow | Worker retries with backoff; queue depth grows | Provider recovers; tasks drain |
 | Provider returns a non-retryable 4xx | Notification moves to `failed` | Operator fixes payload or recipient |
 | Retries exhausted | Notification moves to `dead_letter` | Inspect, fix, then `POST /api/v1/notifications/{id}/retry` |
-| Redis is down | API can persist but cannot enqueue; readiness fails | Redis returns; reconciler enqueues pending, due scheduled, and stale queued rows |
+| Redis is down | API can persist but cannot enqueue; readiness fails | Redis returns; reconciler enqueues pending, due scheduled, stale queued, and expired processing rows |
 | PostgreSQL is down | API returns 503; worker cannot update state | PostgreSQL returns; in-flight tasks retry |
 | Worker crashes mid-call | Task is retried; provider may see a duplicate | DB state guard and provider idempotency header |
 | API crashes after commit | Notification stays `pending` | Reconciler enqueues it |
